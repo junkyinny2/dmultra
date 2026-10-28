@@ -1679,6 +1679,35 @@ impl eframe::App for DmApp {
                 let _ = st.save();
                 self.status_bar = "Settings saved.".into();
             }
+            if let Some(webhooks) = outcome.webhooks {
+                let mut st = self.manager.lock_ui();
+                st.webhooks = webhooks;
+                let _ = st.save();
+            }
+            if outcome.open_log_dir {
+                let dir = crate::state::state_dir().join("logs");
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::process::Command::new("explorer").arg(dir).spawn();
+            }
+            if outcome.clean_temp {
+                if self.manager.active_count() > 0 {
+                    self.status_bar =
+                        "Stop active downloads before cleaning temporary files.".into();
+                } else {
+                    let temp_dir = self.manager.lock_ui().settings.temp_path.clone();
+                    if temp_dir.exists() {
+                        if let Ok(entries) = std::fs::read_dir(&temp_dir) {
+                            for entry in entries.flatten() {
+                                let path = entry.path();
+                                if path.is_file() {
+                                    let _ = std::fs::remove_file(path);
+                                }
+                            }
+                        }
+                    }
+                    self.status_bar = "Temporary files cleaned.".into();
+                }
+            }
         }
 
         // C. Scheduler Dialog (Separate OS Window)
