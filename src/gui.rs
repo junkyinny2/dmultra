@@ -1816,10 +1816,13 @@ impl DmApp {
 
     fn create_download(&mut self, start_now: bool) -> bool {
         self.add_dialog.error.clear();
-        let url_str = self.add_dialog.url.trim().to_string();
+        let mut url_str = self.add_dialog.url.trim().to_string();
         if url_str.is_empty() {
             self.add_dialog.error = "Enter a URL to download.".into();
             return false;
+        }
+        if !url_str.contains("://") {
+            url_str = format!("https://{url_str}");
         }
         let parsed = match url::Url::parse(&url_str) {
             Ok(url) => url,
