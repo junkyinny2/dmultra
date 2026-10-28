@@ -9,6 +9,7 @@
 
 use crate::state::{Settings, Webhook};
 use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Rounding, Stroke, Ui};
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -24,6 +25,14 @@ const CONTROL_W: f32 = 340.0;
 const ROW_MIN_H: f32 = 48.0;
 
 static SEMIBOLD_FONT: AtomicBool = AtomicBool::new(false);
+
+#[derive(Serialize, Deserialize)]
+struct ThemeFile {
+    theme_mode: String,
+    light_theme: String,
+    dark_theme: String,
+    accent: String,
+}
 
 pub fn ui_font(size: f32, semibold: bool) -> FontId {
     if semibold && SEMIBOLD_FONT.load(Ordering::Relaxed) {
@@ -225,7 +234,19 @@ fn base_for(theme: &str) -> Base {
 }
 
 pub fn accent_color(name: &str) -> Color32 {
-    match name {
+    let trimmed = name.trim();
+    if let Some(hex) = trimmed.strip_prefix('#') {
+        if hex.len() == 6 {
+            if let (Ok(r), Ok(g), Ok(b)) = (
+                u8::from_str_radix(&hex[0..2], 16),
+                u8::from_str_radix(&hex[2..4], 16),
+                u8::from_str_radix(&hex[4..6], 16),
+            ) {
+                return c(((r as u32) << 16) | ((g as u32) << 8) | b as u32);
+            }
+        }
+    }
+    match trimmed {
         "green" => c(0x22C55E),
         "violet" => c(0x8B5CF6),
         "rose" => c(0xF43F5E),
@@ -234,13 +255,18 @@ pub fn accent_color(name: &str) -> Color32 {
     }
 }
 
+fn custom_accent_rgb(name: &str) -> [u8; 3] {
+    let color = accent_color(name);
+    [color.r(), color.g(), color.b()]
+}
+
 pub fn accent_name(color: Color32) -> &'static str {
-    for name in ["blue", "green", "violet", "rose", "custom"] {
+    for name in ["blue", "green", "violet", "rose"] {
         if accent_color(name) == color {
             return name;
         }
     }
-    "blue"
+    "custom"
 }
 
 /// Runtime view of the appearance settings (mode + theme slots + accent).
@@ -2111,8 +2137,53 @@ impl SettingsDialog {
                         });
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            disabled_button(ui, pal, "Import\u{2026}");
-                            disabled_button(ui, pal, "Export\u{2026}");
+                            if button(ui, pal, "Import\u{2026}", Btn::Secondary).clicked() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("DM Ultra theme", &["json"])
+                                    .pick_file()
+                                {
+                                    match std::fs::read_to_string(&path) {
+                                        Ok(text) => match serde_json::from_str::<ThemeFile>(&text) {
+                                            Ok(theme) => {
+                                                self.draft.theme_mode = theme.theme_mode;
+                                                self.draft.light_theme = theme.light_theme;
+                                                self.draft.dark_theme = theme.dark_theme;
+                                                self.draft.accent = theme.accent;
+                                                self.sync_buffers();
+                                                self.set_dirty();
+                                                self.toast("Theme settings imported.");
+                                            }
+                                            Err(error) => {
+                                                self.toast(format!("Import failed: {error}"));
+                                            }
+                                        },
+                                        Err(error) => {
+                                            self.toast(format!("Import failed: {error}"));
+                                        }
+                                    }
+                                }
+                            }
+                            if button(ui, pal, "Export\u{2026}", Btn::Secondary).clicked() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("DM Ultra theme", &["json"])
+                                    .set_file_name("dm-ultra-theme.json")
+                                    .save_file()
+                                {
+                                    let theme = ThemeFile {
+                                        theme_mode: self.draft.theme_mode.clone(),
+                                        light_theme: self.draft.light_theme.clone(),
+                                        dark_theme: self.draft.dark_theme.clone(),
+                                        accent: self.draft.accent.clone(),
+                                    };
+                                    match serde_json::to_string_pretty(&theme) {
+                                        Ok(text) => match std::fs::write(&path, text) {
+                                            Ok(()) => self.toast("Theme settings exported."),
+                                            Err(error) => self.toast(format!("Export failed: {error}")),
+                                        },
+                                        Err(error) => self.toast(format!("Export failed: {error}")),
+                                    }
+                                }
+                            }
                         });
                     });
                 });
@@ -2143,18 +2214,23 @@ impl SettingsDialog {
                     let mut first = true;
                     srow!(self, ui, pal, first, drawn, hit, "Theme Color", "Accent color used for buttons and highlights.", |ui| {
                         ui.horizontal(|ui| {
-                            for name in ["blue", "green", "violet", "rose", "custom"] {
+                            for name in ["blue", "green", "violet", "rose"] {
                                 let color = accent_color(name);
                                 let selected = self.draft.accent == name;
                                 if color_dot(ui, color, selected, pal).clicked() {
-                                    if name == "custom" {
-                                        self.toast("Custom accent colors are not implemented in DM Ultra.");
-                                    } else {
-                                        self.draft.accent = name.to_string();
-                                        self.set_dirty();
-                                    }
+                                    self.draft.accent = name.to_string();
+                                    self.set_dirty();
                                 }
                                 ui.add_space(6.0);
+                            }
+                            let mut rgb = custom_accent_rgb(&self.draft.accent);
+                            if ui
+                                .color_edit_button_srgb(&mut rgb)
+                                .on_hover_text("Custom accent color")
+                                .changed()
+                            {
+                                self.draft.accent = format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]);
+                                self.set_dirty();
                             }
                         });
                     });

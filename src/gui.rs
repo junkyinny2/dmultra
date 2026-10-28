@@ -7,15 +7,15 @@
 //! - GUI-thread state access uses `manager.lock_ui()` (bounded spin on
 //!   `try_lock_owned`), NEVER tokio's `blocking_lock`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use eframe::egui::{
-    self, Align2, Color32, FontId, Margin, Rect, RichText, Rounding, Sense, Stroke, Ui, Vec2,
-    ViewportBuilder, ViewportId, pos2, vec2,
+    self, Align2, Color32, CursorIcon, FontId, Key, Margin, Rect, RichText, Rounding, Sense,
+    Stroke, Ui, Vec2, ViewportBuilder, ViewportId, pos2,
 };
 use tray_icon::{
     icon::Icon as TrayIcon,
@@ -25,8 +25,10 @@ use tray_icon::{
 
 use crate::manager::Manager;
 use crate::options::{self, SettingsDialog};
-use crate::queue::MAIN_QUEUE;
-use crate::state::{DownloadRec, Status};
+use crate::queue::{Schedule, MAIN_QUEUE};
+use crate::state::{DownloadRec, State, Status};
+
+const APP_VERSION: &str = include_str!("../VERSION");
 
 // ---------------------------------------------------------------------------
 // Embedded Lucide SVG Icons from assets/icons
@@ -236,14 +238,19 @@ struct AddUrlDialogState {
     queue: String,
     description: String,
     connections: u32,
+    error: String,
 }
 
 #[derive(Default)]
 struct SchedulerDialogState {
     open: bool,
+    queue: String,
     start_time: String,
     stop_time: String,
+    days: Vec<u32>,
     once: bool,
+    on_finish: String,
+    error: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +266,9 @@ pub struct DmApp {
     selected_nav: NavCategory,
     categories_visible: bool,
     search_query: String,
+    search_open: bool,
+    search_focus: bool,
+    search_icon_rect: Rect,
     selected_download_id: Option<u64>,
 
     // Popouts & Child windows
@@ -266,9 +276,22 @@ pub struct DmApp {
     settings_dialog: SettingsDialog,
     scheduler_dialog: SchedulerDialogState,
     active_details_popouts: Vec<u64>, // IDs of open progress popout viewports
+    about_open: bool,
 
-    // Icons
+    // Icons & accent
     icons: IconCache,
+    accent: Color32,
+
+    // Live transfer-rate sampling (per download id)
+    speed_samples: HashMap<u64, (Instant, u64)>,
+    speeds: HashMap<u64, f64>,
+
+    // Scheduler runtime state
+    scheduler_last_tick: Instant,
+    scheduler_last_window: HashMap<String, bool>,
+    scheduler_started: HashSet<String>,
+    scheduler_suppressed: HashSet<String>,
+    active_queue: Option<String>,
 
     // Status bar & Sort
     status_bar: String,
@@ -281,6 +304,10 @@ impl DmApp {
     pub fn new(manager: Arc<Manager>) -> Self {
         let show_flag = Arc::new(Mutex::new(false));
         let tray_icon = create_tray_icon(show_flag.clone()).ok();
+        let accent = {
+            let st = manager.lock_ui();
+            options::accent_color(&st.settings.accent)
+        };
 
         Self {
             manager,
@@ -290,6 +317,9 @@ impl DmApp {
             selected_nav: NavCategory::AllDownloads,
             categories_visible: true,
             search_query: String::new(),
+            search_open: false,
+            search_focus: false,
+            search_icon_rect: Rect::NOTHING,
             selected_download_id: None,
             add_dialog: AddUrlDialogState {
                 connections: 8,
@@ -298,12 +328,23 @@ impl DmApp {
             },
             settings_dialog: SettingsDialog::default(),
             scheduler_dialog: SchedulerDialogState {
+                queue: MAIN_QUEUE.into(),
                 start_time: "02:00".into(),
                 stop_time: "07:00".into(),
+                on_finish: "none".into(),
                 ..Default::default()
             },
             active_details_popouts: Vec::new(),
+            about_open: false,
             icons: IconCache::new(),
+            accent,
+            speed_samples: HashMap::new(),
+            speeds: HashMap::new(),
+            scheduler_last_tick: Instant::now(),
+            scheduler_last_window: HashMap::new(),
+            scheduler_started: HashSet::new(),
+            scheduler_suppressed: HashSet::new(),
+            active_queue: None,
             status_bar: "Ready.".to_string(),
             sort_column: 6, // Last Try
             sort_descending: true,
@@ -312,14 +353,25 @@ impl DmApp {
     }
 
     fn open_add_url(&mut self) {
-        let default_dir = {
+        let (default_dir, default_queue, connections) = {
             let st = self.manager.lock_ui();
-            st.settings.save_path.clone()
+            (
+                st.settings.save_path.clone(),
+                if st.settings.default_queue.trim().is_empty() {
+                    MAIN_QUEUE.to_string()
+                } else {
+                    st.settings.default_queue.clone()
+                },
+                st.settings.max_connections.clamp(1, 32),
+            )
         };
         self.add_dialog.open = true;
         self.add_dialog.save_as = default_dir.to_string_lossy().to_string();
         self.add_dialog.url.clear();
         self.add_dialog.description.clear();
+        self.add_dialog.queue = default_queue;
+        self.add_dialog.connections = connections;
+        self.add_dialog.error.clear();
     }
 
     fn open_settings(&mut self) {
@@ -332,37 +384,122 @@ impl DmApp {
 
     fn open_scheduler(&mut self) {
         self.scheduler_dialog.open = true;
+        self.scheduler_dialog.error.clear();
+        let queue = self
+            .scheduler_dialog
+            .queue
+            .clone()
+            .trim()
+            .to_string();
+        self.load_scheduler_for_queue(if queue.is_empty() { MAIN_QUEUE } else { &queue });
+    }
+
+    fn load_scheduler_for_queue(&mut self, queue: &str) {
+        self.scheduler_dialog.queue = queue.to_string();
+        let schedule = {
+            let st = self.manager.lock_ui();
+            st.schedules.iter().find(|s| s.queue == queue).cloned()
+        };
+        if let Some(schedule) = schedule {
+            self.scheduler_dialog.start_time = schedule
+                .start
+                .map(|(h, m)| format!("{h:02}:{m:02}"))
+                .unwrap_or_default();
+            self.scheduler_dialog.stop_time = schedule
+                .stop
+                .map(|(h, m)| format!("{h:02}:{m:02}"))
+                .unwrap_or_default();
+            self.scheduler_dialog.days = schedule.days.clone();
+            self.scheduler_dialog.once = schedule.once;
+            self.scheduler_dialog.on_finish = schedule.on_finish.clone();
+        } else {
+            self.scheduler_dialog.start_time = "02:00".into();
+            self.scheduler_dialog.stop_time = "07:00".into();
+            self.scheduler_dialog.days.clear();
+            self.scheduler_dialog.once = false;
+            self.scheduler_dialog.on_finish = "none".into();
+        }
+        self.scheduler_dialog.error.clear();
     }
 
     fn start_selected(&mut self) {
-        if let Some(id) = self.selected_download_id {
-            let rec = {
-                let st = self.manager.lock_ui();
-                st.get(id).cloned()
-            };
-            if let Some(mut rec) = rec {
-                if rec.status != Status::Downloading {
-                    rec.status = Status::Downloading;
-                    let _ = self.manager.start(rec, None, None);
-                    self.status_bar = format!("Starting download #{}", id);
+        match self.selected_download_id {
+            Some(_id) if self.selected_nav == NavCategory::Trash => {
+                self.status_bar = "Restore the download before starting it.".into();
+            }
+            Some(id) => self.start_download(id),
+            None => self.status_bar = "Select a download first.".into(),
+        }
+    }
+
+    fn start_download(&mut self, id: u64) {
+        if self.selected_nav == NavCategory::Trash {
+            self.status_bar = "Restore the download before starting it.".into();
+            return;
+        }
+        if self.manager.is_active(id) {
+            self.status_bar = format!("Download #{id} is already running.");
+            return;
+        }
+        let rec = {
+            let st = self.manager.lock_ui();
+            st.get(id).cloned()
+        };
+        if let Some(mut rec) = rec {
+            if rec.status == Status::Downloading {
+                self.status_bar = format!("Download #{id} is already running.");
+                return;
+            }
+            rec.status = Status::Downloading;
+            rec.last_try_date = chrono::Utc::now().timestamp();
+            {
+                let mut st = self.manager.lock_ui();
+                if let Some(d) = st.get_mut(id) {
+                    d.status = Status::Downloading;
+                    d.last_try_date = rec.last_try_date;
+                    let _ = st.save();
                 }
             }
+            match self.manager.start(rec, None, None) {
+                Ok(()) => self.status_bar = format!("Starting download #{id}..."),
+                Err(err) => self.status_bar = format!("Could not start download #{id}: {err}"),
+            }
+        } else {
+            self.status_bar = format!("Download #{id} no longer exists.");
         }
     }
 
     fn pause_selected(&mut self) {
-        if let Some(id) = self.selected_download_id {
-            self.manager.stop(id);
-            let mut st = self.manager.lock_ui();
-            if let Some(d) = st.get_mut(id) {
-                d.status = Status::Paused;
-                let _ = st.save();
+        match self.selected_download_id {
+            Some(_id) if self.selected_nav == NavCategory::Trash => {
+                self.status_bar = "Restore the download before pausing it.".into();
             }
-            self.status_bar = format!("Paused download #{}", id);
+            Some(id) => self.pause_download(id),
+            None => self.status_bar = "Select a download first.".into(),
+        }
+    }
+
+    fn pause_download(&mut self, id: u64) {
+        if self.selected_nav == NavCategory::Trash {
+            self.status_bar = "Restore the download before pausing it.".into();
+            return;
+        }
+        self.manager.stop(id);
+        let mut st = self.manager.lock_ui();
+        if let Some(d) = st.get_mut(id) {
+            d.status = Status::Paused;
+            let _ = st.save();
+            self.status_bar = format!("Paused download #{id}.");
+        } else {
+            self.status_bar = format!("Download #{id} no longer exists.");
         }
     }
 
     fn resume_all(&mut self) {
+        if self.selected_nav == NavCategory::Trash {
+            self.status_bar = "Restore downloads before resuming them.".into();
+            return;
+        }
         let to_resume = {
             let st = self.manager.lock_ui();
             st.downloads.iter()
@@ -374,36 +511,75 @@ impl DmApp {
         for rec in to_resume {
             let _ = self.manager.start(rec, None, None);
         }
-        self.status_bar = format!("Resumed {} download(s).", count);
+        self.status_bar = if count == 0 {
+            "No paused or queued downloads to resume.".into()
+        } else {
+            format!("Resumed {count} download(s).")
+        };
     }
 
     fn stop_all(&mut self) {
         self.manager.stop_all();
         let mut st = self.manager.lock_ui();
+        let mut count = 0usize;
         for d in &mut st.downloads {
             if d.status == Status::Downloading {
                 d.status = Status::Paused;
+                count += 1;
             }
         }
         let _ = st.save();
-        self.status_bar = "All downloads stopped.".to_string();
+        self.status_bar = if count == 0 {
+            "No active downloads to stop.".into()
+        } else {
+            format!("Stopped {count} download(s).")
+        };
     }
 
     fn delete_selected(&mut self) {
-        if let Some(id) = self.selected_download_id {
-            self.manager.stop(id);
+        let Some(id) = self.selected_download_id else {
+            self.status_bar = "Select a download first.".into();
+            return;
+        };
+        if self.selected_nav == NavCategory::Trash {
             let mut st = self.manager.lock_ui();
-            if let Some(idx) = st.downloads.iter().position(|d| d.id == id) {
-                let rec = st.downloads.remove(idx);
-                st.trash.push(rec);
+            if let Some(idx) = st.trash.iter().position(|d| d.id == id) {
+                st.trash.remove(idx);
                 let _ = st.save();
-                self.status_bar = format!("Moved download #{} to Trash.", id);
+                self.status_bar = format!("Deleted download #{id} permanently.");
+            } else {
+                self.status_bar = format!("Download #{id} is not in Trash.");
             }
             self.selected_download_id = None;
+            return;
         }
+        self.manager.stop(id);
+        let mut st = self.manager.lock_ui();
+        if let Some(idx) = st.downloads.iter().position(|d| d.id == id) {
+            let rec = st.downloads.remove(idx);
+            st.trash.push(rec);
+            let _ = st.save();
+            self.status_bar = format!("Moved download #{id} to Trash.");
+        } else {
+            self.status_bar = format!("Download #{id} no longer exists.");
+        }
+        self.selected_download_id = None;
     }
 
     fn delete_all(&mut self) {
+        if self.selected_nav == NavCategory::Trash {
+            let mut st = self.manager.lock_ui();
+            let count = st.trash.len();
+            st.trash.clear();
+            let _ = st.save();
+            self.selected_download_id = None;
+            self.status_bar = if count == 0 {
+                "Trash is already empty.".into()
+            } else {
+                format!("Deleted {count} item(s) from Trash permanently.")
+            };
+            return;
+        }
         self.manager.stop_all();
         let mut st = self.manager.lock_ui();
         let count = st.downloads.len();
@@ -412,7 +588,416 @@ impl DmApp {
         }
         let _ = st.save();
         self.selected_download_id = None;
-        self.status_bar = format!("Moved all {} download(s) to Trash.", count);
+        self.status_bar = if count == 0 {
+            "No downloads to delete.".into()
+        } else {
+            format!("Moved all {count} download(s) to Trash.")
+        };
+    }
+
+    fn restore_download(&mut self, id: u64) {
+        let mut st = self.manager.lock_ui();
+        if let Some(idx) = st.trash.iter().position(|d| d.id == id) {
+            let mut rec = st.trash.remove(idx);
+            rec.status = Status::Queued;
+            st.downloads.push(rec);
+            let _ = st.save();
+            self.status_bar = format!("Restored download #{id} to the download list.");
+            self.selected_nav = NavCategory::AllDownloads;
+            self.selected_download_id = Some(id);
+        } else {
+            self.status_bar = format!("Download #{id} is not in Trash.");
+        }
+    }
+
+    fn start_queue_manual(&mut self) {
+        if self.manager.queue_running() {
+            self.status_bar = "Queue processing is already running.".into();
+            return;
+        }
+        self.scheduler_suppressed.remove(MAIN_QUEUE);
+        self.active_queue = Some(MAIN_QUEUE.to_string());
+        self.manager.start_queue(MAIN_QUEUE.to_string());
+        self.status_bar = format!("Started queue \"{MAIN_QUEUE}\".");
+    }
+
+    fn stop_queue_manual(&mut self) {
+        if !self.manager.queue_running() {
+            self.status_bar = "Queue processing is not running.".into();
+            return;
+        }
+        self.manager.queue_stop();
+        self.scheduler_suppressed.insert(MAIN_QUEUE.to_string());
+        self.scheduler_started.remove(MAIN_QUEUE);
+        self.active_queue = None;
+        self.status_bar = format!("Stopped queue \"{MAIN_QUEUE}\".");
+    }
+
+    fn queued_count_for(&self, queue: &str) -> usize {
+        let st = self.manager.lock_ui();
+        st.downloads
+            .iter()
+            .filter(|d| d.status == Status::Queued && d.queue.as_deref() == Some(queue))
+            .count()
+    }
+
+    /// Sample live transfer rates from the manager's byte counters. The
+    /// display is smoothed over ~0.4 s samples so it stays readable.
+    fn sample_speeds(&mut self) {
+        let now = Instant::now();
+        let active: Vec<u64> = {
+            let st = self.manager.lock_ui();
+            st.downloads
+                .iter()
+                .filter(|d| d.status == Status::Downloading)
+                .map(|d| d.id)
+                .collect()
+        };
+        let active_set: HashSet<u64> = active.iter().copied().collect();
+
+        for id in active {
+            let Some(stats) = self.manager.stats(id) else {
+                continue;
+            };
+            let bytes = stats.bytes();
+            match self.speed_samples.get(&id).copied() {
+                Some((then, previous)) => {
+                    let elapsed = now.duration_since(then);
+                    if elapsed >= Duration::from_millis(400) {
+                        let dt = elapsed.as_secs_f64().max(0.001);
+                        let instant = bytes.saturating_sub(previous) as f64 / dt;
+                        let smoothed = self
+                            .speeds
+                            .get(&id)
+                            .copied()
+                            .map(|value| value * 0.55 + instant * 0.45)
+                            .unwrap_or(instant);
+                        self.speeds.insert(id, smoothed.max(0.0));
+                        self.speed_samples.insert(id, (now, bytes));
+                    }
+                }
+                None => {
+                    self.speed_samples.insert(id, (now, bytes));
+                }
+            }
+        }
+
+        self.speeds.retain(|id, _| active_set.contains(id));
+        self.speed_samples.retain(|id, _| active_set.contains(id));
+    }
+
+    /// Drive scheduled queues from the GUI thread: start a queue while its
+    /// schedule window is open and stop it once the window closes. A manual
+    /// Stop suppresses the schedule until the next window transition.
+    fn scheduler_tick(&mut self) {
+        if self.scheduler_last_tick.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.scheduler_last_tick = Instant::now();
+
+        let schedules = {
+            let st = self.manager.lock_ui();
+            st.schedules.clone()
+        };
+        if schedules.is_empty() {
+            self.scheduler_last_window.clear();
+            return;
+        }
+
+        let mut start_queue: Option<String> = None;
+        for schedule in &schedules {
+            let active = schedule.active_now();
+            let was_active = self
+                .scheduler_last_window
+                .insert(schedule.queue.clone(), active)
+                .unwrap_or(false);
+            if active && !was_active {
+                self.scheduler_suppressed.remove(&schedule.queue);
+            }
+
+            let already_ours =
+                self.active_queue.as_deref() == Some(schedule.queue.as_str());
+            if active
+                && !self.scheduler_suppressed.contains(&schedule.queue)
+                && !already_ours
+                && !self.manager.queue_running()
+                && self.queued_count_for(&schedule.queue) > 0
+                && start_queue.is_none()
+            {
+                start_queue = Some(schedule.queue.clone());
+            }
+
+            if !active && already_ours {
+                if self.manager.queue_running() {
+                    self.manager.queue_stop();
+                    self.status_bar = format!(
+                        "Scheduler stopped queue \"{}\" (outside its start window).",
+                        schedule.queue
+                    );
+                }
+                self.active_queue = None;
+            }
+        }
+
+        if let Some(queue) = start_queue {
+            self.active_queue = Some(queue.clone());
+            self.manager.start_queue(queue.clone());
+            self.status_bar = format!("Scheduler started queue \"{queue}\".");
+        }
+    }
+
+    /// Apply the active column sort to the filtered download list.
+    fn sort_items(&self, items: &mut [DownloadRec]) {
+        let column = self.sort_column;
+        let descending = self.sort_descending;
+        let remaining = |d: &DownloadRec| -> u64 {
+            let speed = self.speeds.get(&d.id).copied().unwrap_or(0.0);
+            if speed < 1.0 || d.file_size == 0 {
+                return u64::MAX;
+            }
+            let left = d.file_size.saturating_sub(d.total_downloaded());
+            (left as f64 / speed) as u64
+        };
+        let rate = |d: &DownloadRec| -> u64 {
+            self.speeds.get(&d.id).copied().unwrap_or(0.0) as u64
+        };
+        items.sort_by(|a, b| {
+            let order = match column {
+                0 => file_name_of(a)
+                    .to_lowercase()
+                    .cmp(&file_name_of(b).to_lowercase()),
+                2 => a.file_size.cmp(&b.file_size),
+                3 => a.status.as_str().cmp(b.status.as_str()),
+                4 => remaining(a).cmp(&remaining(b)),
+                5 => rate(a).cmp(&rate(b)),
+                6 => a.last_try_date.cmp(&b.last_try_date),
+                7 => a
+                    .description
+                    .to_lowercase()
+                    .cmp(&b.description.to_lowercase()),
+                _ => a.id.cmp(&b.id),
+            };
+            if descending {
+                order.reverse()
+            } else {
+                order
+            }
+        });
+    }
+
+    /// Small search popup anchored under the header's magnifier icon.
+    fn render_search_popup(&mut self, ctx: &egui::Context) {
+        if !self.search_open {
+            return;
+        }
+        let mut open = true;
+        let anchor = if self.search_icon_rect.width() > 0.0 {
+            pos2(
+                (self.search_icon_rect.left() - 170.0).max(8.0),
+                self.search_icon_rect.bottom() + 4.0,
+            )
+        } else {
+            pos2(180.0, 70.0)
+        };
+
+        egui::Area::new(egui::Id::new("dm-search-popup"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(anchor)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(BG_PANEL)
+                    .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
+                    .rounding(Rounding::same(4.0))
+                    .inner_margin(Margin::same(8.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let response = ui.add_sized(
+                                [220.0, 22.0],
+                                egui::TextEdit::singleline(&mut self.search_query)
+                                    .hint_text("Search downloads"),
+                            );
+                            if self.search_focus {
+                                response.request_focus();
+                                self.search_focus = false;
+                            }
+                            if ui.button("X").clicked() {
+                                open = false;
+                            }
+                        });
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("File name, URL, description or queue")
+                                    .size(10.5)
+                                    .color(TEXT_DIM),
+                            );
+                            if !self.search_query.is_empty()
+                                && ui.button("Clear").clicked()
+                            {
+                                self.search_query.clear();
+                            }
+                        });
+                    });
+            });
+
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            open = false;
+        }
+        if !open {
+            self.search_open = false;
+        }
+    }
+
+    fn save_schedule(&mut self) {
+        let queue = self.scheduler_dialog.queue.trim().to_string();
+        let queue = if queue.is_empty() {
+            MAIN_QUEUE.to_string()
+        } else {
+            queue
+        };
+        let start = match parse_optional_hm(&self.scheduler_dialog.start_time) {
+            Ok(value) => value,
+            Err(message) => {
+                self.scheduler_dialog.error = message;
+                return;
+            }
+        };
+        let stop = match parse_optional_hm(&self.scheduler_dialog.stop_time) {
+            Ok(value) => value,
+            Err(message) => {
+                self.scheduler_dialog.error = message;
+                return;
+            }
+        };
+        if start.is_some() && start == stop {
+            self.scheduler_dialog.error =
+                "Start and stop times cannot be the same.".into();
+            return;
+        }
+
+        let mut days = self.scheduler_dialog.days.clone();
+        days.sort_unstable();
+        days.dedup();
+        let on_finish = if self.scheduler_dialog.on_finish == "exit" {
+            "exit"
+        } else {
+            "none"
+        };
+        let schedule = Schedule {
+            queue: queue.clone(),
+            start,
+            stop,
+            days,
+            once: self.scheduler_dialog.once,
+            on_finish: on_finish.into(),
+        };
+
+        let result = {
+            let mut st = self.manager.lock_ui();
+            st.schedules.retain(|s| s.queue != queue);
+            st.schedules.push(schedule);
+            if !st.queues.iter().any(|q| q == &queue) {
+                st.queues.push(queue.clone());
+            }
+            st.save()
+        };
+
+        match result {
+            Ok(()) => {
+                self.scheduler_dialog.error.clear();
+                self.scheduler_dialog.open = false;
+                self.status_bar = format!("Saved schedule for queue \"{queue}\".");
+            }
+            Err(error) => {
+                self.scheduler_dialog.error = format!("Could not save schedule: {error}");
+            }
+        }
+    }
+
+    fn clear_schedule(&mut self) {
+        let queue = self.scheduler_dialog.queue.trim().to_string();
+        let queue = if queue.is_empty() {
+            MAIN_QUEUE.to_string()
+        } else {
+            queue
+        };
+        let result = {
+            let mut st = self.manager.lock_ui();
+            let before = st.schedules.len();
+            st.schedules.retain(|s| s.queue != queue);
+            let removed = before - st.schedules.len();
+            let saved = st.save();
+            (removed, saved)
+        };
+
+        match result {
+            (removed, Ok(())) => {
+                if self.active_queue.as_deref() == Some(queue.as_str()) {
+                    if self.manager.queue_running() {
+                        self.manager.queue_stop();
+                    }
+                    self.active_queue = None;
+                }
+                self.scheduler_dialog.start_time.clear();
+                self.scheduler_dialog.stop_time.clear();
+                self.scheduler_dialog.days.clear();
+                self.scheduler_dialog.once = false;
+                self.scheduler_dialog.on_finish = "none".into();
+                self.scheduler_dialog.error.clear();
+                self.status_bar = if removed == 0 {
+                    format!("Queue \"{queue}\" has no schedule to clear.")
+                } else {
+                    format!("Cleared schedule for queue \"{queue}\".")
+                };
+            }
+            (_, Err(error)) => {
+                self.scheduler_dialog.error =
+                    format!("Could not clear schedule: {error}");
+            }
+        }
+    }
+
+    fn show_about(&mut self, ctx: &egui::Context) {
+        if !self.about_open {
+            return;
+        }
+        let mut open = true;
+        let mut close_clicked = false;
+        egui::Window::new("About DM Ultra")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(BG_PANEL)
+                    .inner_margin(Margin::same(16.0)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(300.0);
+                ui.label(RichText::new("DM Ultra").size(20.0).strong().color(TEXT_MAIN));
+                ui.label(
+                    RichText::new(format!("Version {}", APP_VERSION.trim()))
+                        .size(12.0)
+                        .color(TEXT_DIM),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Multi-threaded download manager for Windows.")
+                        .color(TEXT_MAIN),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Local use only. No accounts, telemetry, or cloud services.")
+                        .size(11.5)
+                        .color(TEXT_DIM),
+                );
+                ui.add_space(12.0);
+                if ui.button("Close").clicked() {
+                    close_clicked = true;
+                }
+            });
+        self.about_open = open && !close_clicked;
     }
 
     fn count_for_category(&self, cat: NavCategory) -> usize {
@@ -421,14 +1006,14 @@ impl DmApp {
             NavCategory::AllDownloads => st.downloads.len(),
             NavCategory::InProgress   => st.downloads.iter().filter(|d| d.status == Status::Downloading).count(),
             NavCategory::Completed    => st.downloads.iter().filter(|d| d.status == Status::Complete).count(),
-            NavCategory::Queued       => st.downloads.iter().filter(|d| d.status == Status::Queued).count(),
+            NavCategory::Queued       => st.downloads.iter().filter(|d| d.status == Status::Queued && !queue_has_schedule(&st, d.queue.as_deref())).count(),
             NavCategory::Paused       => st.downloads.iter().filter(|d| d.status == Status::Paused).count(),
             NavCategory::Documents    => st.downloads.iter().filter(|d| is_file_type(&d.save_path, &["pdf","doc","docx","txt","rtf","xls","xlsx","ppt","pptx"])).count(),
             NavCategory::Music        => st.downloads.iter().filter(|d| is_file_type(&d.save_path, &["mp3","wav","wma","m4a","aac","flac","ogg","aif"])).count(),
             NavCategory::Video        => st.downloads.iter().filter(|d| is_file_type(&d.save_path, &["mp4","mkv","avi","mov","wmv","flv","webm","3gp","mpeg","mpg"])).count(),
             NavCategory::Programs     => st.downloads.iter().filter(|d| is_file_type(&d.save_path, &["exe","msi","apk","iso","img","bin"])).count(),
             NavCategory::Compressed   => st.downloads.iter().filter(|d| is_file_type(&d.save_path, &["zip","rar","7z","tar","gz","bz2","xz"])).count(),
-            NavCategory::Scheduled    => st.downloads.iter().filter(|d| d.status == Status::Queued && d.queue.is_some()).count(),
+            NavCategory::Scheduled    => st.downloads.iter().filter(|d| d.status == Status::Queued && queue_has_schedule(&st, d.queue.as_deref())).count(),
             NavCategory::Trash        => st.trash.len(),
         }
     }
@@ -466,6 +1051,11 @@ impl eframe::App for DmApp {
         // Apply dark styling to egui context
         apply_app_style(ctx);
 
+        // Live transfer-rate sampling and schedule enforcement run before
+        // the frame is built so the table and status bar show current data.
+        self.sample_speeds();
+        self.scheduler_tick();
+
         // -------------------------------------------------------------------
         // 1. Menu Bar (Tasks, File, Downloads, View, Help)
         // -------------------------------------------------------------------
@@ -476,6 +1066,13 @@ impl eframe::App for DmApp {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 egui::menu::bar(ui, |ui| {
                     ui.menu_button(RichText::new("Tasks").color(TEXT_MAIN), |ui| {
+                        if ui.button("Start Queue Processing").clicked() {
+                            self.start_queue_manual();
+                        }
+                        if ui.button("Stop Queue Processing").clicked() {
+                            self.stop_queue_manual();
+                        }
+                        ui.separator();
                         if ui.button("Exit").clicked() {
                             std::process::exit(0);
                         }
@@ -530,7 +1127,7 @@ impl eframe::App for DmApp {
 
                     ui.menu_button(RichText::new("Help").color(TEXT_MAIN), |ui| {
                         if ui.button("About DM Ultra").clicked() {
-                            self.status_bar = "DM Ultra 1.0.0 (64-bit multi-threaded download manager)".to_string();
+                            self.about_open = true;
                         }
                     });
                 });
@@ -555,46 +1152,46 @@ impl eframe::App for DmApp {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(4.0);
 
-                    // Add URL (blue plus)
-                    let icon_add = self.icons.get_or_render(ctx, "add", SVG_ADD, ACCENT_BLUE, 30);
-                    if render_toolbar_button(ui, &icon_add, "Add URL", ACCENT_BLUE, button_w) {
+                    // Add URL (accent plus)
+                    let icon_add = self.icons.get_or_render(ctx, "add", SVG_ADD, self.accent, 34);
+                    if render_toolbar_button(ui, &icon_add, "Add URL", self.accent, button_w) {
                         self.open_add_url();
                     }
 
                     toolbar_separator(ui);
 
                     // Start
-                    let icon_start = self.icons.get_or_render(ctx, "start", SVG_START, TEXT_DIM, 27);
+                    let icon_start = self.icons.get_or_render(ctx, "start", SVG_START, TEXT_DIM, 34);
                     if render_toolbar_button(ui, &icon_start, "Start", TEXT_DIM, button_w) {
                         self.start_selected();
                     }
 
                     // Pause
-                    let icon_pause = self.icons.get_or_render(ctx, "pause", SVG_PAUSE, TEXT_DIM, 27);
+                    let icon_pause = self.icons.get_or_render(ctx, "pause", SVG_PAUSE, TEXT_DIM, 34);
                     if render_toolbar_button(ui, &icon_pause, "Pause", TEXT_DIM, button_w) {
                         self.pause_selected();
                     }
 
                     // Stop All
-                    let icon_stop = self.icons.get_or_render(ctx, "stop", SVG_STOP_ALL, TEXT_DIM, 27);
+                    let icon_stop = self.icons.get_or_render(ctx, "stop", SVG_STOP_ALL, TEXT_DIM, 34);
                     if render_toolbar_button(ui, &icon_stop, "Stop All", TEXT_DIM, button_w) {
                         self.stop_all();
                     }
 
                     // Resume All (green play)
-                    let icon_resume = self.icons.get_or_render(ctx, "resume", SVG_RESUME_ALL, ACCENT_GREEN, 30);
+                    let icon_resume = self.icons.get_or_render(ctx, "resume", SVG_RESUME_ALL, ACCENT_GREEN, 34);
                     if render_toolbar_button(ui, &icon_resume, "Resume All", ACCENT_GREEN, button_w) {
                         self.resume_all();
                     }
 
                     // Delete
-                    let icon_del = self.icons.get_or_render(ctx, "delete", SVG_DELETE, TEXT_DIM, 27);
+                    let icon_del = self.icons.get_or_render(ctx, "delete", SVG_DELETE, TEXT_DIM, 34);
                     if render_toolbar_button(ui, &icon_del, "Delete", TEXT_DIM, button_w) {
                         self.delete_selected();
                     }
 
                     // Delete All
-                    let icon_del_all = self.icons.get_or_render(ctx, "delete_all", SVG_DELETE_ALL, ACCENT_RED, 27);
+                    let icon_del_all = self.icons.get_or_render(ctx, "delete_all", SVG_DELETE_ALL, ACCENT_RED, 34);
                     if render_toolbar_button(ui, &icon_del_all, "Delete All", ACCENT_RED, button_w) {
                         self.delete_all();
                     }
@@ -602,13 +1199,13 @@ impl eframe::App for DmApp {
                     toolbar_separator(ui);
 
                     // Options
-                    let icon_opt = self.icons.get_or_render(ctx, "options", SVG_OPTIONS, TEXT_DIM, 27);
+                    let icon_opt = self.icons.get_or_render(ctx, "options", SVG_OPTIONS, TEXT_DIM, 34);
                     if render_toolbar_button(ui, &icon_opt, "Options", TEXT_DIM, button_w) {
                         self.open_settings();
                     }
 
                     // Scheduler
-                    let icon_sched = self.icons.get_or_render(ctx, "scheduler", SVG_SCHEDULER, TEXT_DIM, 27);
+                    let icon_sched = self.icons.get_or_render(ctx, "scheduler", SVG_SCHEDULER, TEXT_DIM, 34);
                     if render_toolbar_button(ui, &icon_sched, "Scheduler", TEXT_DIM, button_w) {
                         self.open_scheduler();
                     }
@@ -649,6 +1246,7 @@ impl eframe::App for DmApp {
         if self.categories_visible {
             egui::SidePanel::left("categories_sidebar")
                 .exact_width(146.0)
+                .resizable(false)
                 .frame(
                     egui::Frame::none()
                         .fill(BG_PANEL)
@@ -692,10 +1290,10 @@ impl eframe::App for DmApp {
                     for (cat, svg, key) in main_cats {
                         let selected = self.selected_nav == cat;
                         let count = self.count_for_category(cat);
-                        let icon_color = if selected { ACCENT_BLUE } else { TEXT_DIM };
+                        let icon_color = if selected { self.accent } else { TEXT_DIM };
                         let icon = self.icons.get_or_render(ctx, key, svg, icon_color, 16);
 
-                        if render_sidebar_item(ui, &icon, cat.label(), count, selected) {
+                        if render_sidebar_item(ui, &icon, cat.label(), count, selected, self.accent) {
                             self.selected_nav = cat;
                         }
                     }
@@ -720,10 +1318,10 @@ impl eframe::App for DmApp {
                     for (cat, svg, key) in queue_cats {
                         let selected = self.selected_nav == cat;
                         let count = self.count_for_category(cat);
-                        let icon_color = if selected { ACCENT_BLUE } else { TEXT_DIM };
+                        let icon_color = if selected { self.accent } else { TEXT_DIM };
                         let icon = self.icons.get_or_render(ctx, key, svg, icon_color, 16);
 
-                        if render_sidebar_item(ui, &icon, cat.label(), count, selected) {
+                        if render_sidebar_item(ui, &icon, cat.label(), count, selected, self.accent) {
                             self.selected_nav = cat;
                         }
                     }
@@ -741,8 +1339,8 @@ impl eframe::App for DmApp {
 
                     let count = self.count_for_category(NavCategory::Trash);
                     let selected = self.selected_nav == NavCategory::Trash;
-                    let icon = self.icons.get_or_render(ctx, "trash_cat", SVG_DELETE, if selected { ACCENT_BLUE } else { TEXT_DIM }, 16);
-                    if render_sidebar_item(ui, &icon, "Trash", count, selected) {
+                    let icon = self.icons.get_or_render(ctx, "trash_cat", SVG_DELETE, if selected { self.accent } else { TEXT_DIM }, 16);
+                    if render_sidebar_item(ui, &icon, "Trash", count, selected, self.accent) {
                         self.selected_nav = NavCategory::Trash;
                     }
 
@@ -792,7 +1390,15 @@ impl eframe::App for DmApp {
                                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                                 Color32::WHITE,
                             );
-                            icon_resp.on_hover_text("Search");
+                            self.search_icon_rect = icon_rect;
+                            if icon_resp
+                                .on_hover_text("Search downloads")
+                                .on_hover_cursor(CursorIcon::Default)
+                                .clicked()
+                            {
+                                self.search_open = !self.search_open;
+                                self.search_focus = self.search_open;
+                            }
                             ui.add_space(4.0);
 
                             // Column 2: Size
@@ -817,36 +1423,59 @@ impl eframe::App for DmApp {
                     });
 
                 // Get visible downloads based on selected category & search filter
-                let items: Vec<DownloadRec> = {
+                let query = self.search_query.trim().to_lowercase();
+                let mut items: Vec<DownloadRec> = {
                     let st = self.manager.lock_ui();
                     let source = if self.selected_nav == NavCategory::Trash {
                         &st.trash
                     } else {
                         &st.downloads
                     };
+                    let scheduled_queues: HashSet<&str> = st
+                        .schedules
+                        .iter()
+                        .map(|schedule| schedule.queue.as_str())
+                        .collect();
 
                     source.iter().filter(|d| {
+                        let is_scheduled = d
+                            .queue
+                            .as_deref()
+                            .map(|queue| scheduled_queues.contains(queue))
+                            .unwrap_or(false);
                         // Category filter
                         match self.selected_nav {
                             NavCategory::AllDownloads => true,
                             NavCategory::InProgress   => d.status == Status::Downloading,
                             NavCategory::Completed    => d.status == Status::Complete,
-                            NavCategory::Queued       => d.status == Status::Queued,
+                            NavCategory::Queued       => d.status == Status::Queued && !is_scheduled,
                             NavCategory::Paused       => d.status == Status::Paused,
                             NavCategory::Documents    => is_file_type(&d.save_path, &["pdf","doc","docx","txt","rtf","xls","xlsx","ppt","pptx"]),
                             NavCategory::Music        => is_file_type(&d.save_path, &["mp3","wav","wma","m4a","aac","flac","ogg","aif"]),
                             NavCategory::Video        => is_file_type(&d.save_path, &["mp4","mkv","avi","mov","wmv","flv","webm","3gp","mpeg","mpg"]),
                             NavCategory::Programs     => is_file_type(&d.save_path, &["exe","msi","apk","iso","img","bin"]),
                             NavCategory::Compressed   => is_file_type(&d.save_path, &["zip","rar","7z","tar","gz","bz2","xz"]),
-                            NavCategory::Scheduled    => d.status == Status::Queued && d.queue.is_some(),
+                            NavCategory::Scheduled    => d.status == Status::Queued && is_scheduled,
                             NavCategory::Trash        => true,
                         }
                     }).filter(|d| {
-                        // Search filter
-                        self.search_query.is_empty()
-                            || d.save_path.to_string_lossy().to_lowercase().contains(&self.search_query.to_lowercase())
+                        // Search filter: file name, URL, description, queue.
+                        if query.is_empty() {
+                            return true;
+                        }
+                        let haystack = format!(
+                            "{} {} {} {}",
+                            file_name_of(d),
+                            d.url,
+                            d.description,
+                            d.queue.as_deref().unwrap_or("")
+                        )
+                        .to_lowercase();
+                        haystack.contains(&query)
                     }).cloned().collect()
                 };
+
+                self.sort_items(&mut items);
 
                 if items.is_empty() {
                     // Empty state centred inside the download-list body, not
@@ -857,7 +1486,12 @@ impl eframe::App for DmApp {
                     ui.vertical_centered(|ui| {
                         ui.label(RichText::new("No downloads").size(18.0).color(TEXT_EMPTY_TITLE));
                         ui.add_space(5.0);
-                        ui.label(RichText::new("Click Add URL on the toolbar to start downloading.").size(13.0).color(TEXT_EMPTY_SUB));
+                        let subtitle = if query.is_empty() {
+                            "Click Add URL on the toolbar to start downloading."
+                        } else {
+                            "No downloads match your search."
+                        };
+                        ui.label(RichText::new(subtitle).size(13.0).color(TEXT_EMPTY_SUB));
                     });
                 } else {
                     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
@@ -874,7 +1508,12 @@ impl eframe::App for DmApp {
                             let live_stats = self.manager.stats(d.id);
                             let total_bytes = if d.file_size > 0 { d.file_size } else { live_stats.as_ref().map(|s| s.total()).unwrap_or(0) };
                             let downloaded_bytes = live_stats.as_ref().map(|s| s.bytes()).unwrap_or_else(|| d.total_downloaded());
-                            let speed_bps = 0u64; // can sample from manager
+                            let speed_bps = self
+                                .speeds
+                                .get(&d.id)
+                                .copied()
+                                .unwrap_or(0.0)
+                                .round() as u64;
 
                             let row_resp = egui::Frame::none()
                                 .fill(bg_color)
@@ -932,20 +1571,49 @@ impl eframe::App for DmApp {
                                         // 7. Description
                                         ui.add_sized(Vec2::new(cols.description, 18.0), egui::Label::new(RichText::new(&d.description).size(12.0).color(TEXT_DIM)).truncate(true));
                                     });
-                                }).response;
+                                })
+                                .response
+                                .on_hover_cursor(CursorIcon::Default);
 
                             // Handle selection and double-click to open popout
                             if row_resp.interact(Sense::click()).clicked() {
                                 self.selected_download_id = Some(d.id);
                             }
-                            if row_resp.double_clicked() {
+                            if row_resp.double_clicked()
+                                && self.selected_nav != NavCategory::Trash
+                            {
                                 if !self.active_details_popouts.contains(&d.id) {
                                     self.active_details_popouts.push(d.id);
                                 }
                             }
 
-                            // Context menu
+                            // Context menu (Trash rows get restore/delete
+                            // actions instead of download controls).
                             row_resp.context_menu(|ui| {
+                                if self.selected_nav == NavCategory::Trash {
+                                    if ui.button("Restore").clicked() {
+                                        self.restore_download(d.id);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Delete Permanently").clicked() {
+                                        self.selected_download_id = Some(d.id);
+                                        self.delete_selected();
+                                        ui.close_menu();
+                                    }
+                                    ui.separator();
+                                    if ui.button("Copy Download URL").clicked() {
+                                        ctx.output_mut(|o| o.copied_text = d.url.clone());
+                                        self.status_bar = "URL copied to clipboard.".into();
+                                        ui.close_menu();
+                                    }
+                                    ui.separator();
+                                    if ui.button("Empty Trash").clicked() {
+                                        self.delete_all();
+                                        ui.close_menu();
+                                    }
+                                    return;
+                                }
+
                                 if ui.button("Start / Resume").clicked() {
                                     self.selected_download_id = Some(d.id);
                                     self.start_selected();
@@ -1005,6 +1673,7 @@ impl eframe::App for DmApp {
             self.settings_dialog.show(ctx);
             let outcome = self.settings_dialog.take_outcome();
             if let Some(new_settings) = outcome.settings {
+                self.accent = ui_accent(&new_settings.accent);
                 let mut st = self.manager.lock_ui();
                 st.settings = new_settings;
                 let _ = st.save();
@@ -1022,6 +1691,10 @@ impl eframe::App for DmApp {
         for id in popout_ids {
             self.show_progress_viewport(ctx, id);
         }
+
+        // E. In-app overlays that are not download flows.
+        self.render_search_popup(ctx);
+        self.show_about(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1041,8 +1714,8 @@ impl DmApp {
             viewport_id,
             ViewportBuilder::default()
                 .with_title("Add new download...")
-                .with_inner_size([480.0, 240.0])
-                .with_min_inner_size([420.0, 200.0])
+                .with_inner_size([500.0, 340.0])
+                .with_min_inner_size([440.0, 300.0])
                 .with_always_on_top(),
             |ctx, _class| {
                 if ctx.input(|i| i.viewport().close_requested()) {
@@ -1054,34 +1727,77 @@ impl DmApp {
 
                     // URL row
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Address:").color(TEXT_DIM));
-                        ui.add_sized(Vec2::new(360.0, 24.0), egui::TextEdit::singleline(&mut self.add_dialog.url).hint_text("https://example.com/file.zip"));
+                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Address:").color(TEXT_DIM)));
+                        ui.add_sized(Vec2::new(370.0, 24.0), egui::TextEdit::singleline(&mut self.add_dialog.url).hint_text("https://example.com/file.zip"));
                     });
                     ui.add_space(6.0);
 
                     // Save As row
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Save To:").color(TEXT_DIM));
-                        ui.add_sized(Vec2::new(320.0, 24.0), egui::TextEdit::singleline(&mut self.add_dialog.save_as));
+                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Save To:").color(TEXT_DIM)));
+                        ui.add_sized(Vec2::new(330.0, 24.0), egui::TextEdit::singleline(&mut self.add_dialog.save_as));
                         if ui.button("...").clicked() {
                             if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                                 self.add_dialog.save_as = folder.to_string_lossy().to_string();
                             }
                         }
                     });
-                    ui.add_space(14.0);
+                    ui.add_space(6.0);
+
+                    // Queue row
+                    let queues = {
+                        let st = self.manager.lock_ui();
+                        st.queues.clone()
+                    };
+                    ui.horizontal(|ui| {
+                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Queue:").color(TEXT_DIM)));
+                        let mut queue = self.add_dialog.queue.clone();
+                        egui::ComboBox::from_id_source("add_url_queue")
+                            .width(260.0)
+                            .selected_text(if queue.is_empty() { MAIN_QUEUE } else { queue.as_str() })
+                            .show_ui(ui, |ui| {
+                                for name in &queues {
+                                    ui.selectable_value(&mut queue, name.clone(), name);
+                                }
+                                if !queues.iter().any(|name| name == MAIN_QUEUE) {
+                                    ui.selectable_value(&mut queue, MAIN_QUEUE.to_string(), MAIN_QUEUE);
+                                }
+                            });
+                        if queue != self.add_dialog.queue {
+                            self.add_dialog.queue = queue;
+                        }
+                    });
+                    ui.add_space(6.0);
+
+                    // Description row
+                    ui.horizontal(|ui| {
+                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Description:").color(TEXT_DIM)));
+                        ui.add_sized(Vec2::new(370.0, 24.0), egui::TextEdit::singleline(&mut self.add_dialog.description).hint_text("Optional note"));
+                    });
+                    ui.add_space(6.0);
+
+                    // Connections row
+                    ui.horizontal(|ui| {
+                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Connections:").color(TEXT_DIM)));
+                        ui.add(egui::DragValue::new(&mut self.add_dialog.connections).clamp_range(1..=32));
+                        ui.label(RichText::new("simultaneous connections").size(11.0).color(TEXT_DIM));
+                    });
+
+                    if !self.add_dialog.error.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(&self.add_dialog.error).size(11.5).color(STATUS_FAILED));
+                    }
+                    ui.add_space(12.0);
 
                     // Action buttons
                     ui.horizontal(|ui| {
                         if ui.button(RichText::new("  OK (Download Now)  ").color(TEXT_MAIN)).clicked() {
-                            if !self.add_dialog.url.trim().is_empty() {
-                                self.create_download(true);
+                            if self.create_download(true) {
                                 self.add_dialog.open = false;
                             }
                         }
                         if ui.button(RichText::new(" Download Later ").color(TEXT_DIM)).clicked() {
-                            if !self.add_dialog.url.trim().is_empty() {
-                                self.create_download(false);
+                            if self.create_download(false) {
                                 self.add_dialog.open = false;
                             }
                         }
@@ -1098,10 +1814,59 @@ impl DmApp {
         }
     }
 
-    fn create_download(&mut self, start_now: bool) {
+    fn create_download(&mut self, start_now: bool) -> bool {
+        self.add_dialog.error.clear();
         let url_str = self.add_dialog.url.trim().to_string();
-        let default_filename = url_str.split('?').next().unwrap_or("").split('/').last().unwrap_or("file.dat");
-        let save_path = PathBuf::from(&self.add_dialog.save_as).join(default_filename);
+        if url_str.is_empty() {
+            self.add_dialog.error = "Enter a URL to download.".into();
+            return false;
+        }
+        let parsed = match url::Url::parse(&url_str) {
+            Ok(url) => url,
+            Err(error) => {
+                self.add_dialog.error = format!("Invalid URL: {error}");
+                return false;
+            }
+        };
+        if !matches!(parsed.scheme(), "http" | "https" | "ftp") {
+            self.add_dialog.error = "Only HTTP, HTTPS and FTP URLs are supported.".into();
+            return false;
+        }
+        if parsed.host_str().unwrap_or("").is_empty() {
+            self.add_dialog.error = "The URL must include a host name.".into();
+            return false;
+        }
+
+        let save_dir = PathBuf::from(self.add_dialog.save_as.trim());
+        if self.add_dialog.save_as.trim().is_empty() {
+            self.add_dialog.error = "Choose a folder to save the file in.".into();
+            return false;
+        }
+        if !save_dir.is_dir() {
+            self.add_dialog.error = "The selected save folder does not exist.".into();
+            return false;
+        }
+
+        let raw_name = parsed
+            .path_segments()
+            .and_then(|mut segments| segments.next_back().map(str::to_string))
+            .unwrap_or_default();
+        let decoded = percent_encoding::percent_decode_str(&raw_name)
+            .decode_utf8_lossy()
+            .to_string();
+        let filename = sanitize_filename(&decoded);
+        let save_path = save_dir.join(filename);
+
+        let queue = {
+            let queue = self.add_dialog.queue.trim().to_string();
+            if queue.is_empty() {
+                MAIN_QUEUE.to_string()
+            } else {
+                queue
+            }
+        };
+        let connections = self.add_dialog.connections.clamp(1, 32);
+        let description = self.add_dialog.description.trim().to_string();
 
         let mut st = self.manager.lock_ui();
         let id = st.max_id;
@@ -1116,29 +1881,49 @@ impl DmApp {
             etag: None,
             last_modified: None,
             chunks: Vec::new(),
-            status: if start_now { Status::Downloading } else { Status::Queued },
+            status: if start_now {
+                Status::Downloading
+            } else {
+                Status::Queued
+            },
             last_error: None,
             downloaded_secs: 0,
             date_added: chrono::Utc::now().timestamp(),
             last_try_date: chrono::Utc::now().timestamp(),
-            queue: Some(self.add_dialog.queue.clone()),
+            queue: Some(queue.clone()),
             group: None,
-            description: self.add_dialog.description.clone(),
-            max_connections: Some(self.add_dialog.connections),
+            description,
+            max_connections: Some(connections),
             mirrors: Vec::new(),
             temp_dir: st.settings.temp_path.clone(),
             restarted: false,
         };
 
         st.downloads.push(rec.clone());
-        let _ = st.save();
+        if !st.queues.iter().any(|name| name == &queue) {
+            st.queues.push(queue.clone());
+        }
+        let saved = st.save();
+        drop(st);
+
+        if let Err(error) = saved {
+            let mut st = self.manager.lock_ui();
+            st.downloads.retain(|download| download.id != id);
+            let _ = st.save();
+            self.add_dialog.error = format!("Could not save download: {error}");
+            return false;
+        }
 
         if start_now {
-            let _ = self.manager.start(rec, None, None);
-            self.status_bar = format!("Added and started download #{}", id);
+            if let Err(error) = self.manager.start(rec, None, None) {
+                self.status_bar = format!("Added download #{id}; could not start: {error}");
+            } else {
+                self.status_bar = format!("Added and started download #{id}.");
+            }
         } else {
-            self.status_bar = format!("Queued download #{}", id);
+            self.status_bar = format!("Queued download #{id}.");
         }
+        true
     }
 
     fn show_scheduler_viewport(&mut self, ctx: &egui::Context) {
@@ -1149,32 +1934,100 @@ impl DmApp {
             viewport_id,
             ViewportBuilder::default()
                 .with_title("Scheduler")
-                .with_inner_size([460.0, 320.0])
-                .with_min_inner_size([400.0, 260.0])
+                .with_inner_size([480.0, 430.0])
+                .with_min_inner_size([420.0, 380.0])
                 .with_always_on_top(),
             |ctx, _class| {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
                 }
+                let queues = {
+                    let st = self.manager.lock_ui();
+                    st.queues.clone()
+                };
+                let mut chosen_queue = self.scheduler_dialog.queue.clone();
                 egui::CentralPanel::default().frame(egui::Frame::none().fill(BG_PANEL).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
                     ui.label(RichText::new("Schedule Queued Downloads").size(14.0).strong().color(TEXT_MAIN));
                     ui.add_space(8.0);
 
                     ui.horizontal(|ui| {
+                        ui.label(RichText::new("Queue:").color(TEXT_DIM));
+                        egui::ComboBox::from_id_source("scheduler_queue")
+                            .width(250.0)
+                            .selected_text(if chosen_queue.is_empty() { MAIN_QUEUE } else { chosen_queue.as_str() })
+                            .show_ui(ui, |ui| {
+                                for name in &queues {
+                                    ui.selectable_value(&mut chosen_queue, name.clone(), name);
+                                }
+                                if !queues.iter().any(|name| name == MAIN_QUEUE) {
+                                    ui.selectable_value(&mut chosen_queue, MAIN_QUEUE.to_string(), MAIN_QUEUE);
+                                }
+                            });
+                    });
+                    if chosen_queue != self.scheduler_dialog.queue {
+                        let queue = chosen_queue.clone();
+                        self.load_scheduler_for_queue(&queue);
+                    }
+                    ui.add_space(6.0);
+
+                    ui.horizontal(|ui| {
                         ui.label(RichText::new("Start time:").color(TEXT_DIM));
-                        ui.text_edit_singleline(&mut self.scheduler_dialog.start_time);
+                        ui.add_sized(Vec2::new(120.0, 24.0), egui::TextEdit::singleline(&mut self.scheduler_dialog.start_time).hint_text("HH:MM, blank = disabled"));
                     });
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Stop time:").color(TEXT_DIM));
-                        ui.text_edit_singleline(&mut self.scheduler_dialog.stop_time);
+                        ui.add_sized(Vec2::new(120.0, 24.0), egui::TextEdit::singleline(&mut self.scheduler_dialog.stop_time).hint_text("HH:MM, blank = disabled"));
                     });
-                    ui.add_space(10.0);
-                    ui.checkbox(&mut self.scheduler_dialog.once, "Run once only");
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Times are local. Overnight windows (start after stop) are supported.").size(10.5).color(TEXT_DIM));
+                    ui.add_space(8.0);
 
-                    ui.add_space(16.0);
+                    ui.label(RichText::new("Days:").color(TEXT_DIM));
+                    ui.horizontal_wrapped(|ui| {
+                        let labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+                        for (index, label) in labels.iter().enumerate() {
+                            let mut active = self.scheduler_dialog.days.contains(&(index as u32));
+                            if ui.checkbox(&mut active, *label).changed() {
+                                if active {
+                                    if !self.scheduler_dialog.days.contains(&(index as u32)) {
+                                        self.scheduler_dialog.days.push(index as u32);
+                                    }
+                                } else {
+                                    self.scheduler_dialog.days.retain(|day| *day != index as u32);
+                                }
+                            }
+                        }
+                    });
+                    ui.label(RichText::new("Leave all days unselected to run every day.").size(10.5).color(TEXT_DIM));
+                    ui.add_space(8.0);
+                    ui.checkbox(&mut self.scheduler_dialog.once, "Run once only");
+                    ui.add_space(6.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("When finished:").color(TEXT_DIM));
+                        egui::ComboBox::from_id_source("scheduler_on_finish")
+                            .selected_text(match self.scheduler_dialog.on_finish.as_str() {
+                                "exit" => "Exit DM Ultra",
+                                _ => "Do nothing",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.scheduler_dialog.on_finish, "none".into(), "Do nothing");
+                                ui.selectable_value(&mut self.scheduler_dialog.on_finish, "exit".into(), "Exit DM Ultra");
+                            });
+                    });
+
+                    if !self.scheduler_dialog.error.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(&self.scheduler_dialog.error).size(11.5).color(STATUS_FAILED));
+                    }
+
+                    ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if ui.button(" Save Schedule ").clicked() {
-                            self.scheduler_dialog.open = false;
+                            self.save_schedule();
+                        }
+                        if ui.button(" Clear Schedule ").clicked() {
+                            self.clear_schedule();
                         }
                         if ui.button(" Close ").clicked() {
                             self.scheduler_dialog.open = false;
@@ -1200,14 +2053,20 @@ impl DmApp {
 
         if let Some(d) = rec {
             let stats = self.manager.stats(id);
+            let speed_bps = self
+                .speeds
+                .get(&id)
+                .copied()
+                .unwrap_or(0.0)
+                .round() as u64;
             let filename = d.save_path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
             ctx.show_viewport_immediate(
                 viewport_id,
                 ViewportBuilder::default()
                     .with_title(format!("Download status - {}", filename))
-                    .with_inner_size([500.0, 320.0])
-                    .with_min_inner_size([440.0, 260.0])
+                    .with_inner_size([500.0, 360.0])
+                    .with_min_inner_size([440.0, 300.0])
                     .with_always_on_top(),
                 |ctx, _class| {
                     if ctx.input(|i| i.viewport().close_requested()) {
@@ -1227,6 +2086,14 @@ impl DmApp {
 
                         ui.label(RichText::new(format!("Downloaded: {} / {}", human_bytes(downloaded), if total > 0 { human_bytes(total) } else { "Unknown".into() })).color(TEXT_DIM));
                         ui.label(RichText::new(format!("Status: {}", d.status.as_str())).color(TEXT_MAIN));
+                        ui.label(RichText::new(format!("Transfer rate: {}", if d.status == Status::Downloading && speed_bps > 0 { format!("{}/s", human_bytes(speed_bps)) } else { "--".into() })).color(TEXT_DIM));
+                        let eta = if d.status == Status::Downloading && speed_bps > 0 && total > downloaded {
+                            format_eta(total.saturating_sub(downloaded), speed_bps)
+                        } else {
+                            "--".into()
+                        };
+                        ui.label(RichText::new(format!("Time left: {}", eta)).color(TEXT_DIM));
+                        ui.label(RichText::new(format!("Queue: {}", d.queue.as_deref().unwrap_or("Main download queue"))).color(TEXT_DIM));
 
                         // Segment bars
                         if let Some(ref st) = stats {
@@ -1247,11 +2114,16 @@ impl DmApp {
                         ui.horizontal(|ui| {
                             if d.status == Status::Downloading {
                                 if ui.button(" Pause ").clicked() {
-                                    self.pause_selected();
+                                    self.pause_download(id);
                                 }
                             } else {
                                 if ui.button(" Resume ").clicked() {
-                                    self.start_selected();
+                                    self.start_download(id);
+                                }
+                            }
+                            if ui.button(" Open Folder ").clicked() {
+                                if let Some(parent) = d.save_path.parent() {
+                                    let _ = std::process::Command::new("explorer").arg(parent).spawn();
                                 }
                             }
                             if ui.button(" Close ").clicked() {
@@ -1290,7 +2162,7 @@ impl DmApp {
             FontId::proportional(12.0),
             color,
         );
-        response.clicked()
+        response.on_hover_cursor(CursorIcon::Default).clicked()
     }
 
     fn toggle_sort(&mut self, col: usize) {
@@ -1322,8 +2194,8 @@ fn render_toolbar_button(
 
     // Icon sits above its label, with the whole cell clickable.
     let icon_rect = Rect::from_center_size(
-        pos2(rect.center().x, rect.top() + 18.0),
-        Vec2::splat(28.0),
+        pos2(rect.center().x, rect.top() + 22.0),
+        Vec2::splat(34.0),
     );
     ui.painter().image(
         icon.id(),
@@ -1332,14 +2204,17 @@ fn render_toolbar_button(
         Color32::WHITE,
     );
     ui.painter().text(
-        pos2(rect.center().x, rect.bottom() - 6.0),
+        pos2(rect.center().x, rect.bottom() - 12.0),
         Align2::CENTER_CENTER,
         label,
         FontId::proportional(11.0),
         text_color,
     );
 
-    response.on_hover_text(label).clicked()
+    response
+        .on_hover_text(label)
+        .on_hover_cursor(CursorIcon::Default)
+        .clicked()
 }
 
 /// Hairline divider between toolbar command groups.
@@ -1352,11 +2227,18 @@ fn toolbar_separator(ui: &mut Ui) {
     );
 }
 
-fn render_sidebar_item(ui: &mut Ui, icon: &egui::TextureHandle, label: &str, count: usize, selected: bool) -> bool {
+fn render_sidebar_item(
+    ui: &mut Ui,
+    icon: &egui::TextureHandle,
+    label: &str,
+    count: usize,
+    selected: bool,
+    accent: Color32,
+) -> bool {
     let bg_color = if selected { BG_PILL_SELECTED } else { Color32::TRANSPARENT };
     let text_color = if selected { TEXT_MAIN } else { TEXT_DIM };
     let badge_bg = if selected { BG_BADGE_SEL } else { BG_BADGE };
-    let badge_text = if selected { ACCENT_BLUE } else { TEXT_BADGE };
+    let badge_text = if selected { accent } else { TEXT_BADGE };
 
     let resp = egui::Frame::none()
         .fill(bg_color)
@@ -1382,7 +2264,9 @@ fn render_sidebar_item(ui: &mut Ui, icon: &egui::TextureHandle, label: &str, cou
             });
         }).response;
 
-    resp.interact(Sense::click()).clicked()
+    resp.interact(Sense::click())
+        .on_hover_cursor(CursorIcon::Default)
+        .clicked()
 }
 
 fn apply_app_style(ctx: &egui::Context) {
@@ -1401,6 +2285,7 @@ fn apply_app_style(ctx: &egui::Context) {
     style.visuals.selection.bg_fill = BG_ROW_SELECTED;
     style.visuals.window_stroke = Stroke::new(1.0, BORDER_HAIRLINE);
     style.spacing.item_spacing = Vec2::new(6.0, 4.0);
+    style.interaction.selectable_labels = false;
     ctx.set_style(style);
 
     // Install native Windows Segoe UI fonts
@@ -1413,6 +2298,67 @@ fn is_file_type(path: &std::path::Path, exts: &[&str]) -> bool {
         exts.iter().any(|&e| e == ext_lower)
     } else {
         false
+    }
+}
+
+fn file_name_of(download: &DownloadRec) -> String {
+    download
+        .save_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| download.url.clone())
+}
+
+fn sanitize_filename(name: &str) -> String {
+    let mut result = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_control() || "<>:\"/\\|?*".contains(ch) {
+            result.push('_');
+        } else {
+            result.push(ch);
+        }
+    }
+    let trimmed = result.trim_matches(|ch| ch == ' ' || ch == '.');
+    if trimmed.is_empty() {
+        "download.bin".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn parse_optional_hm(input: &str) -> Result<Option<(u32, u32)>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let (hour, minute) = trimmed
+        .split_once(':')
+        .ok_or_else(|| "Use HH:MM for times.".to_string())?;
+    let hour: u32 = hour
+        .trim()
+        .parse()
+        .map_err(|_| "Hour must be a number.".to_string())?;
+    let minute: u32 = minute
+        .trim()
+        .parse()
+        .map_err(|_| "Minute must be a number.".to_string())?;
+    if hour > 23 || minute > 59 {
+        return Err("Time must be between 00:00 and 23:59.".to_string());
+    }
+    Ok(Some((hour, minute)))
+}
+
+fn ui_accent(name: &str) -> Color32 {
+    if name == "blue" || name.is_empty() {
+        return ACCENT_BLUE;
+    }
+    options::accent_color(name)
+}
+
+fn queue_has_schedule(state: &State, queue: Option<&str>) -> bool {
+    match queue {
+        Some(queue) => state.schedules.iter().any(|schedule| schedule.queue == queue),
+        None => false,
     }
 }
 

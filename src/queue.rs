@@ -91,6 +91,13 @@ impl Schedule {
             None => false,
         }
     }
+
+    /// True when today is a scheduled day and the local clock is inside the
+    /// configured start/stop window. Used by the GUI scheduler tick; the
+    /// queue worker applies the same rules while it runs.
+    pub fn active_now(&self) -> bool {
+        self.day_matches() && self.within_start_window(Self::now_hm())
+    }
 }
 
 /// Wait until the schedule's start window opens (polling every 20s).
