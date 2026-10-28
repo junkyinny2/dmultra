@@ -461,7 +461,13 @@ impl DmApp {
                 }
             }
             match self.manager.start(rec, None, None) {
-                Ok(()) => self.status_bar = format!("Starting download #{id}..."),
+                Ok(()) => {
+                    self.status_bar = format!("Starting download #{id}...");
+                    let show_progress = self.manager.lock_ui().settings.show_progress_window;
+                    if show_progress && !self.active_details_popouts.contains(&id) {
+                        self.active_details_popouts.push(id);
+                    }
+                }
                 Err(err) => self.status_bar = format!("Could not start download #{id}: {err}"),
             }
         } else {
@@ -1935,8 +1941,13 @@ impl DmApp {
         if !st.queues.iter().any(|name| name == &queue) {
             st.queues.push(queue.clone());
         }
+        let show_progress = st.settings.show_progress_window;
         let saved = st.save();
         drop(st);
+
+        if start_now && show_progress && !self.active_details_popouts.contains(&id) {
+            self.active_details_popouts.push(id);
+        }
 
         if let Err(error) = saved {
             let mut st = self.manager.lock_ui();
