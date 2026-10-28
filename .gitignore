@@ -1,0 +1,7 @@
+/target
+*.exe
+*.pdb
+*.crx
+*.xpi
+browser-key.xml
+desktop_strings*.txt

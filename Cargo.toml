@@ -1,0 +1,44 @@
+[package]
+name = "dmultra"
+version = "1.0.0"
+edition = "2021"
+description = "DM Ultra - multi-threaded download manager with RSS and webhooks"
+license = "MIT"
+
+[[bin]]
+name = "dmultra"
+path = "src/main.rs"
+
+[[bin]]
+name = "dmultra-nmh"
+path = "src/nmh.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "io-util", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "cookies", "gzip", "socks", "json"] }
+url = "2"
+futures-util = "0.3"
+clap = { version = "4", features = ["derive"] }
+eframe = "0.27"
+raw-window-handle = "0.6"
+resvg = "0.44"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indicatif = "0.17"
+anyhow = "1"
+dirs = "5"
+arboard = "3"
+chrono = "0.4"
+percent-encoding = "2"
+md-5 = "0.10"
+rfd = "0.15"
+miniz_oxide = "0.8"
+tray-icon = "0.7"
+image = "0.25"
+
+[build-dependencies]
+winres = "0.1"
+
+[profile.release]
+lto = true
+strip = true
