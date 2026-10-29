@@ -500,6 +500,7 @@ pub struct DmApp {
 
     // Resizable/reorderable download-list columns
     column_widths: Vec<f32>,
+    column_resize_start: Option<(usize, f32)>,
     column_visible: Vec<bool>,
     /// Columns/widths used to lay out the table this frame (see
     /// update_column_geometry).
@@ -582,6 +583,7 @@ impl DmApp {
             clip_last_poll: Instant::now() - Duration::from_secs(5),
             titlebar_last_apply: Instant::now() - Duration::from_secs(5),
             column_widths,
+            column_resize_start: None,
             column_visible,
             display_columns: (0..COLUMN_LABELS.len()).collect(),
             display_widths: DEFAULT_COLUMN_WIDTHS.to_vec(),
@@ -1818,15 +1820,25 @@ impl eframe::App for DmApp {
                                         handle_resp.hovered(),
                                         handle_resp.dragged(),
                                     ));
+                                    if handle_resp.drag_started() {
+                                        let left = visible_columns[position];
+                                        self.column_resize_start =
+                                            Some((left, self.column_widths[left]));
+                                    }
                                     if handle_resp.dragged() {
                                         let left = visible_columns[position];
-                                        let old_left = self.column_widths[left];
+                                        let start_width = self
+                                            .column_resize_start
+                                            .filter(|(index, _)| *index == left)
+                                            .map(|(_, width)| width)
+                                            .unwrap_or(self.column_widths[left]);
                                         self.column_widths[left] =
-                                            (old_left + handle_resp.drag_delta().x).max(40.0);
+                                            (start_width + handle_resp.drag_delta().x).max(40.0);
                                         self.update_column_geometry(available);
                                     }
                                     if handle_resp.drag_stopped() {
                                         self.save_column_settings();
+                                        self.column_resize_start = None;
                                     }
                                 }
                             }
