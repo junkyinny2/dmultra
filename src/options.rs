@@ -333,9 +333,9 @@ impl Appearance {
         let (hairline, row_hover, chrome, nav_selected) = if base.dark {
             (
                 mix(border, surface, 0.35),
-                mix(surface2, surface, 0.45),
+                mix(surface2, Color32::WHITE, 0.16),
                 mix(background, surface, 0.35),
-                mix(surface2, surface, 0.15),
+                mix(surface2, Color32::WHITE, 0.22),
             )
         } else {
             (
