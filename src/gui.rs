@@ -2925,9 +2925,15 @@ impl DmApp {
 /// which pushed short cell text to the middle whenever a column was
 /// stretched; IDM keeps all cell text flush left regardless of width.
 fn cell_label_left(ui: &mut Ui, width: f32, label: egui::Label) {
+    // Left-to-right layout with LEFT main-axis alignment and TOP cross
+    // alignment so cell text hugs the left edge at any column width.
+    // (`Layout::left_to_right` hardcodes main_align to Center - override it.)
+    let mut layout = egui::Layout::left_to_right(egui::Align::TOP);
+    layout.main_align = egui::Align::LEFT;
+    layout.cross_align = egui::Align::TOP;
     ui.allocate_ui_with_layout(
         Vec2::new(width, 18.0),
-        egui::Layout::left_to_right(egui::Align::Center),
+        layout,
         |ui| {
             // Hard cap so wide content truncates at the cell boundary
             // instead of spilling under the grid rule.
