@@ -379,7 +379,8 @@ impl DmApp {
             let st = self.manager.lock_ui();
             (st.settings.clone(), st.webhooks.clone())
         };
-        self.settings_dialog.open_with(&settings, true, webhooks);
+        self.settings_dialog
+            .open_with(&settings, options::system_prefers_dark(), webhooks);
     }
 
     fn open_scheduler(&mut self) {

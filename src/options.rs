@@ -940,6 +940,16 @@ impl SettingsDialog {
 
     fn body(&mut self, ui: &mut Ui, pal: ThemePalette) {
         self.check_proxy_test();
+        let ctx = ui.ctx().clone();
+        let mut style = (*ctx.style()).clone();
+        style.visuals.dark_mode = pal.dark;
+        style.visuals.override_text_color = Some(pal.text);
+        style.visuals.panel_fill = pal.background;
+        style.visuals.window_fill = pal.background;
+        style.visuals.faint_bg_color = pal.surface;
+        style.visuals.extreme_bg_color = pal.surface;
+        ctx.set_style(style);
+
         ui.style_mut().spacing.button_padding = egui::vec2(10.0, 5.0);
         ui.style_mut().spacing.item_spacing = egui::vec2(8.0, 6.0);
 
