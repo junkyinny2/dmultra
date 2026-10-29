@@ -30,6 +30,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use state::{DownloadRec, State, Status};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
 
@@ -278,6 +279,10 @@ pub async fn download_rec(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| rec.url.clone());
     let ui: Arc<dyn ui::ProgressSink> = ui::ProgressUi::new(rec.file_size, &label);
+    let start_conn = rec
+        .max_connections
+        .unwrap_or(st.lock().await.settings.max_connections)
+        .clamp(1, 32);
     let result = engine::run(
         st,
         rec.clone(),
@@ -287,6 +292,7 @@ pub async fn download_rec(
         Some(ui.clone()),
         referer,
         auth,
+        Arc::new(AtomicU32::new(start_conn)),
     )
     .await;
     ui.finish(&result.1);

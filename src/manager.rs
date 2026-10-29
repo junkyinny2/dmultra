@@ -12,7 +12,7 @@ use crate::state::{DownloadRec, State, Status};
 use crate::ui::ProgressSink;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
 
@@ -131,6 +131,8 @@ impl ProgressSink for DownloadStats {
 /// One actively-running download tracked by the manager.
 struct LiveDownload {
     stats: Arc<DownloadStats>,
+    /// Live connection limit (the GUI may raise/lower it mid-run).
+    conn_limit: Arc<AtomicU32>,
     cancel: watch::Sender<bool>,
     finished: watch::Receiver<bool>,
     handle: tokio::task::JoinHandle<()>,
@@ -189,14 +191,30 @@ impl Manager {
         let limiter = self.limiter.clone();
         let quota = self.quota.clone();
         let sink: Arc<dyn ProgressSink> = stats.clone();
+        let conn_limit = Arc::new(AtomicU32::new(
+            rec.max_connections
+                .unwrap_or(self.lock_ui().settings.max_connections)
+                .clamp(1, 32),
+        ));
+        let conn_limit_task = conn_limit.clone();
         let handle = runtime().spawn(async move {
             crate::hooks::notify(&state, crate::hooks::EVENT_STARTED, &rec).await;
-            let _ = engine::run(state, rec, limiter, Some(quota), cancel_rx, Some(sink), referer, auth).await;
+            let _ = engine::run(
+                state, rec, limiter, Some(quota), cancel_rx, Some(sink), referer, auth,
+                conn_limit_task,
+            )
+            .await;
             let _ = fin_tx.send(true);
         });
         self.active.lock().unwrap().insert(
             rec_id,
-            LiveDownload { stats, cancel: cancel_tx, finished: fin_rx, handle },
+            LiveDownload {
+                stats,
+                conn_limit,
+                cancel: cancel_tx,
+                finished: fin_rx,
+                handle,
+            },
         );
         Ok(())
     }
@@ -206,6 +224,25 @@ impl Manager {
         if let Some(live) = map.get(&id) {
             let _ = live.cancel.send(true);
         }
+    }
+
+    /// Live-adjust the connection limit of a running download (the
+    /// engine's supervisor reacts within ~150 ms). Returns the clamped
+    /// value actually applied. Persisting the record is the caller's
+    /// job (the GUI does it through `lock_ui`).
+    pub fn set_connections(&self, id: u64, n: u32) -> u32 {
+        let n = n.clamp(1, 32);
+        let map = self.active.lock().unwrap();
+        if let Some(live) = map.get(&id) {
+            live.conn_limit.store(n, Ordering::SeqCst);
+        }
+        n
+    }
+
+    /// Current live connection limit of a running download, if any.
+    pub fn connections(&self, id: u64) -> Option<u32> {
+        let map = self.active.lock().unwrap();
+        map.get(&id).map(|l| l.conn_limit.load(Ordering::SeqCst))
     }
 
     /// Acquire the state lock from the GUI thread. NEVER uses
@@ -330,6 +367,12 @@ impl Manager {
                 let limiter = manager.limiter.clone();
                 let quota = manager.quota.clone();
                 let item_cancel = cancel_rx.clone();
+                let conn_limit = Arc::new(AtomicU32::new(
+                    rec.max_connections
+                        .unwrap_or(state.lock().await.settings.max_connections)
+                        .clamp(1, 32),
+                ));
+                let conn_limit_task = conn_limit.clone();
                 let handle = runtime().spawn(async move {
                     crate::hooks::notify(&state, crate::hooks::EVENT_STARTED, &rec).await;
                     let _ = engine::run(
@@ -341,13 +384,20 @@ impl Manager {
                         Some(sink),
                         None,
                         None,
+                        conn_limit_task,
                     )
                     .await;
                     let _ = fin_tx.send(true);
                 });
                 manager.active.lock().unwrap().insert(
                     id,
-                    LiveDownload { stats, cancel: cancel_tx.clone(), finished: fin_rx, handle },
+                    LiveDownload {
+                        stats,
+                        conn_limit,
+                        cancel: cancel_tx.clone(),
+                        finished: fin_rx,
+                        handle,
+                    },
                 );
                 // Wait for this item before starting the next
                 // (sequential queue processing).

@@ -17,6 +17,7 @@ use crate::state::{State, Status};
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, Timelike};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
 
@@ -180,6 +181,10 @@ pub async fn run_queue(
         }
 
         println!("Queue: starting #{} {}", rec.id, rec.url);
+        let start_conn = rec
+            .max_connections
+            .unwrap_or(state.lock().await.settings.max_connections)
+            .clamp(1, 32);
         let (updated, outcome) = engine::run(
             state.clone(),
             rec.clone(),
@@ -189,6 +194,7 @@ pub async fn run_queue(
             None,
             None,
             None,
+            Arc::new(AtomicU32::new(start_conn)),
         )
         .await;
 

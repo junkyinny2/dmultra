@@ -72,14 +72,31 @@ pub struct Probe {
 
 /// Build a client with the default settings (UA, identity encoding,
 /// redirects followed, cookies enabled, optional proxies/auth).
+///
+/// Timeout design notes (they matter for segmented downloads):
+///  - The old overall 300 s request timeout also covered the *response
+///    body*, so every slow multi-gigabyte part was force-disconnected
+///    after five minutes and had to re-request from the last validated
+///    offset - large downloads "crawled" exactly on this. Stall
+///    detection now uses a per-read timeout instead, so a connection
+///    stays alive as long as data keeps flowing.
+///  - `http1_only` keeps one TCP connection per range request (IDM
+///    behaviour) should HTTP/2 ever be enabled for this client; h2
+///    would multiplex all "connections" over a single stream and
+///    re-expose per-connection CDN bandwidth caps.
+///  - `tcp_nodelay` avoids Nagle-induced 200 ms gaps between range
+///    pieces on Windows.
 pub fn make_client(settings: &crate::state::Settings, url: &Url) -> Result<Client> {
     let mut builder = Client::builder()
         .user_agent(&settings.user_agent)
         .redirect(reqwest::redirect::Policy::limited(10))
-        .timeout(Duration::from_secs(300))
         .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(60))
         .cookie_store(true)
-        .no_gzip(); // Accept-Encoding: identity by default
+        .no_gzip() // Accept-Encoding: identity by default
+        .http1_only()
+        .tcp_nodelay(true)
+        .pool_idle_timeout(Duration::from_secs(15));
 
     let scheme = url.scheme();
     let proxying = settings.proxy_mode != "none";

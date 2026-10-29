@@ -77,6 +77,12 @@ pub struct Job {
 pub struct Shared {
     pub job: Mutex<Job>,
     pub next_chunk_id: AtomicU32,
+    /// Connection limit the supervisor polls; the GUI can change it
+    /// while the download runs (raise/lower connections live).
+    pub conn_limit: Arc<AtomicU32>,
+    /// Worker index for supervisor-spawned connections (colors /
+    /// ownership ids must stay unique).
+    pub next_worker: AtomicU32,
     pub session_bytes: AtomicU64,
     pub overlap: Mutex<HashMap<u64, Vec<u8>>>,
     pub cancel: watch::Receiver<bool>,
@@ -255,6 +261,7 @@ pub async fn run(
     ui: Option<Arc<dyn ProgressSink>>,
     referer: Option<String>,
     auth: Option<(String, String)>,
+    conn_limit: Arc<AtomicU32>,
 ) -> (DownloadRec, Outcome) {
     // HLS playlists (.m3u8) use a dedicated segment-downloading path
     // (IDM-style video grabbing). The assembled output is a single
@@ -307,6 +314,7 @@ pub async fn run(
             ui.clone(),
             referer.clone(),
             auth.clone(),
+            conn_limit.clone(),
         )
         .await;
         rec = updated;
@@ -431,6 +439,7 @@ async fn run_attempt(
     ui: Option<Arc<dyn ProgressSink>>,
     referer: Option<String>,
     auth: Option<(String, String)>,
+    conn_limit: Arc<AtomicU32>,
 ) -> (DownloadRec, Result<Outcome, StopReason>) {
     let mut rec = rec.clone();
     rec.status = Status::Downloading;
@@ -535,6 +544,9 @@ async fn run_attempt(
     // ------------------------------------------------------------------
     let part_dir = settings.temp_path.join(format!("d{}", rec.id));
     let max_conn = if single_conn {
+        // Single-connection recovery overrides the live limit for this
+        // attempt (restart-from-scratch after corrupt data / no-range).
+        conn_limit.store(1, Ordering::SeqCst);
         1
     } else {
         rec.max_connections.unwrap_or(settings.max_connections)
@@ -581,6 +593,8 @@ async fn run_attempt(
             probe_total,
             resumable,
         }),
+        conn_limit,
+        next_worker: AtomicU32::new(n_workers as u32),
         next_chunk_id: AtomicU32::new(
             rec.chunks.iter().map(|c| c.id).max().unwrap_or(u32::MAX - 1) + 1,
         ),
@@ -613,8 +627,15 @@ async fn run_attempt(
 
     // ------------------------------------------------------------------
     // Spawn workers + periodic state saver
+    //
+    // A supervisor keeps the live worker count equal to the connection
+    // limit so the GUI can raise or lower the connections while the
+    // download runs. Raising the limit splits the largest part so new
+    // connections have work to claim (IDM behaviour); lowering it lets
+    // workers finish their current part and exit. Active parts never
+    // exceed the limit.
     // ------------------------------------------------------------------
-    let mut handles = Vec::new();
+    let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     for w in 0..n_workers as u32 {
         let shared = shared.clone();
         let url = url.clone();
@@ -645,6 +666,78 @@ async fn run_attempt(
             }
         })
     };
+
+    // Supervisor: match the worker count to the connection limit.
+    {
+        let shared = shared.clone();
+        let url = url.clone();
+        let scheme = scheme.clone();
+        loop {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            handles.retain(|h| !h.is_finished());
+
+            let stop_now = {
+                if shared.cancel.borrow().to_owned() {
+                    Some(StopReason::Cancelled)
+                } else {
+                    shared.stop_reason().await
+                }
+            };
+            let (all_done, claimed, unclaimed, largest_rem) = {
+                let job = shared.job.lock().await;
+                let mut largest = 0u64;
+                for c in &job.rec.chunks {
+                    if !c.is_compl && c.end != u64::MAX {
+                        largest = largest.max(c.remaining());
+                    }
+                }
+                (
+                    job.rec.chunks.iter().all(|c| c.is_compl),
+                    job.rec
+                        .chunks
+                        .iter()
+                        .filter(|c| c.conn != 0 && !c.is_compl)
+                        .count(),
+                    job.rec
+                        .chunks
+                        .iter()
+                        .filter(|c| c.conn == 0 && !c.is_compl && c.remaining() > 0)
+                        .count(),
+                    largest,
+                )
+            };
+            if stop_now.is_some() || all_done {
+                break;
+            }
+
+            let limit = shared.conn_limit.load(Ordering::SeqCst).clamp(1, 32) as usize;
+            let deficit = limit.saturating_sub(handles.len());
+            if deficit == 0 {
+                continue;
+            }
+            if unclaimed == 0 && largest_rem <= MIN_SPLIT_REMAINING {
+                // No claimable work and the largest part is too small
+                // to split: do not churn idle tasks; once a worker
+                // finishes (or the limit rises further) work appears.
+                continue;
+            }
+            if unclaimed == 0 {
+                // Under-used limit and the largest part can feed a new
+                // connection: split it so the new workers have tails to
+                // claim (IDM behaviour when you raise connections).
+                maybe_split_largest(&shared).await;
+            }
+            for _ in 0..deficit {
+                let shared = shared.clone();
+                let url = url.clone();
+                let scheme = scheme.clone();
+                let idx = shared.next_worker.fetch_add(1, Ordering::SeqCst);
+                handles.push(tokio::spawn(async move {
+                    worker_loop(shared, url, scheme, idx).await;
+                }));
+            }
+        }
+    }
 
     for h in handles {
         let _ = h.await;
@@ -766,13 +859,21 @@ async fn worker_loop(shared: Arc<Shared>, url: url::Url, scheme: String, worker_
 
         match result {
             Ok(true) => {
-                {
+                let (cstart, cend, cdown, clen) = {
                     let mut job = shared.job.lock().await;
+                    let mut vals = (chunk.start, chunk.end, chunk.downloaded, chunk.len());
                     if let Some(c) = job.rec.chunks.iter_mut().find(|c| c.id == chunk.id) {
                         c.is_compl = true;
                         c.conn = 0;
                         c.etm = crate::state::unix_now() as i64;
+                        vals = (c.start, c.end, c.downloaded, c.len());
                     }
+                    vals
+                };
+                // Publish the finished part with conn = 0 so the GUI
+                // counts only live connections (this one just retired).
+                if let Some(ui) = &shared.ui {
+                    ui.chunk_update(idx, cstart, cend, cdown, clen, 0);
                 }
                 // Dynamic split: hand the tail half of the largest
                 // remaining chunk to free capacity.
@@ -788,14 +889,22 @@ async fn worker_loop(shared: Arc<Shared>, url: url::Url, scheme: String, worker_
 }
 
 /// Split the largest remaining chunk in half (if > MIN_SPLIT_REMAINING)
-/// so waiting connections can take over the tail.
+/// so waiting connections can take over the tail. Never exceeds the
+/// live connection limit, and never touches unknown-size (end == MAX)
+/// chunks, whose length is not known yet.
 async fn maybe_split_largest(shared: &Arc<Shared>) {
+    let limit = shared.conn_limit.load(Ordering::SeqCst).clamp(1, 32) as usize;
     let mut job = shared.job.lock().await;
     let chunks = &mut job.rec.chunks;
+    if chunks.iter().filter(|c| !c.is_compl).count() >= limit {
+        // Every connection already owns a part; splitting further would
+        // fan out more live connections than the limit allows.
+        return;
+    }
     let mut best: Option<usize> = None;
     let mut best_rem = 0u64;
     for (i, c) in chunks.iter().enumerate() {
-        if c.is_compl {
+        if c.is_compl || c.end == u64::MAX {
             continue;
         }
         let rem = c.remaining();

@@ -553,6 +553,25 @@ impl DmApp {
         }
     }
 
+    /// Raise/lower the connection limit for one download. Persists the
+    /// record and, when the download is running, pushes the new limit
+    /// into the live engine (supervisor reacts within ~150 ms).
+    fn set_download_connections(&mut self, id: u64, n: u32) {
+        let n = n.clamp(1, 32);
+        {
+            let mut st = self.manager.lock_ui();
+            if let Some(d) = st.get_mut(id) {
+                d.max_connections = Some(n);
+                let _ = st.save();
+            } else {
+                self.status_bar = format!("Download #{id} no longer exists.");
+                return;
+            }
+        }
+        self.manager.set_connections(id, n);
+        self.status_bar = format!("Connections for download #{id} set to {n}.");
+    }
+
     fn resume_all(&mut self) {
         if self.selected_nav == NavCategory::Trash {
             self.status_bar = "Restore downloads before resuming them.".into();
@@ -2420,11 +2439,38 @@ impl DmApp {
                                 ui.end_row();
 
                                 ui.label(RichText::new("Connections:").color(text_dim()));
-                                let connections = stats
-                                    .as_ref()
-                                    .map(|s| s.segments().len())
-                                    .unwrap_or(d.max_connections.unwrap_or(1) as usize);
-                                ui.label(RichText::new(connections.to_string()).color(text_main()));
+                                // Live connections = parts currently
+                                // transferring (the engine marks finished
+                                // parts conn = 0). The value used to show
+                                // raw bar segments, which includes splits
+                                // and finished parts - that is why 8
+                                // connections could display 26.
+                                let segs = stats.as_ref().map(|s| s.segments()).unwrap_or_default();
+                                let active_conns =
+                                    segs.iter().filter(|s| s.conn != 0 && s.downloaded < s.len).count();
+                                let limit = d.max_connections.unwrap_or(1).clamp(1, 32);
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(if stats.is_some() {
+                                        format!("{active_conns} / {limit}")
+                                    } else {
+                                        limit.to_string()
+                                    })
+                                    .color(text_main()));
+                                    if ui
+                                        .small_button("  -  ")
+                                        .on_hover_text("Fewer connections")
+                                        .clicked()
+                                    {
+                                        self.set_download_connections(id, limit.saturating_sub(1).max(1));
+                                    }
+                                    if ui
+                                        .small_button(" + ")
+                                        .on_hover_text("More connections")
+                                        .clicked()
+                                    {
+                                        self.set_download_connections(id, (limit + 1).min(32));
+                                    }
+                                });
                                 ui.end_row();
 
                                 ui.label(RichText::new("Resumable:").color(text_dim()));
