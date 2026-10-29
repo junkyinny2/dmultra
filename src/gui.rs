@@ -1464,10 +1464,14 @@ impl eframe::App for DmApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(bg_dark()))
             .show(ctx, |ui| {
-                // Keep one shared column geometry for the header and rows so
-                // the table lines up at every window width.
-                let (visible_columns, column_widths) =
-                    self.column_layout(ui.available_width() - 16.0);
+                let viewport_width = ui.available_width();
+                egui::ScrollArea::horizontal()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // Keep one shared column geometry for the header and rows so
+                        // the table lines up at every window width.
+                        let (visible_columns, column_widths) =
+                            self.column_layout(viewport_width - 16.0);
 
                 // Table header (single compact 27 px row)
                 egui::Frame::none()
@@ -1653,7 +1657,7 @@ impl eframe::App for DmApp {
                                 .show(ui, |ui| {
                                     ui.spacing_mut().item_spacing.x = 0.0;
                                     let (visible_columns, column_widths) =
-                                        self.column_layout(ui.available_width() - 16.0);
+                                        self.column_layout(ui.available_width());
                                     ui.horizontal(|ui| {
                                         for (position, &column) in visible_columns.iter().enumerate() {
                                             let width = column_widths[position];
@@ -1894,6 +1898,7 @@ impl eframe::App for DmApp {
                         }
                     });
                 }
+            });
             });
 
         // -------------------------------------------------------------------
@@ -2666,9 +2671,14 @@ fn apply_app_style(ctx: &egui::Context) {
     style.visuals.widgets.inactive.bg_fill = bg_panel();
     style.visuals.widgets.hovered.bg_fill = bg_row_hover();
     style.visuals.widgets.active.bg_fill = bg_row_selected();
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, border_hairline());
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, border_hairline());
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, border_hairline());
     style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, text_dim());
     style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, text_main());
+    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, text_main());
     style.visuals.selection.bg_fill = bg_row_selected();
+    style.visuals.selection.stroke = Stroke::new(1.0, text_main());
     style.visuals.window_stroke = Stroke::new(1.0, border_hairline());
     style.spacing.item_spacing = Vec2::new(6.0, 4.0);
     style.interaction.selectable_labels = false;

@@ -960,12 +960,16 @@ impl SettingsDialog {
         style.visuals.faint_bg_color = pal.surface;
         style.visuals.extreme_bg_color = pal.surface;
         style.visuals.widgets.inactive.bg_fill = pal.surface;
+        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, pal.border);
         style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, pal.text);
         style.visuals.widgets.hovered.bg_fill = pal.surface2;
+        style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, pal.border);
         style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, pal.text);
         style.visuals.widgets.active.bg_fill = pal.accent;
+        style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, pal.accent);
         style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
         style.visuals.selection.bg_fill = pal.accent;
+        style.visuals.selection.stroke = egui::Stroke::new(1.0, Color32::WHITE);
         style.visuals.selection.stroke = egui::Stroke::new(1.0, Color32::WHITE);
         style.interaction.selectable_labels = false;
         ctx.set_style(style);
