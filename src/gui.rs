@@ -418,8 +418,6 @@ struct AddUrlDialogState {
     description: String,
     connections: u32,
     error: String,
-    /// Centers the OS window on the main window once per open.
-    positioned: bool,
 }
 
 #[derive(Default)]
@@ -443,8 +441,6 @@ struct DeleteConfirmState {
     all: bool,
     ids: Vec<u64>,
     from_disk: bool,
-    /// Centers the OS window on the main window once per open.
-    positioned: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -612,7 +608,6 @@ impl DmApp {
         self.add_dialog.queue = default_queue;
         self.add_dialog.connections = connections;
         self.add_dialog.error.clear();
-        self.add_dialog.positioned = false;
     }
 
     /// Open the Add-URL window prefilled with a URL (clipboard watcher
@@ -831,7 +826,6 @@ impl DmApp {
         self.delete_confirm.all = false;
         self.delete_confirm.ids = vec![id];
         self.delete_confirm.from_disk = false;
-        self.delete_confirm.positioned = false;
     }
 
     /// Open the delete confirmation window for every download in the
@@ -852,7 +846,6 @@ impl DmApp {
         self.delete_confirm.all = true;
         self.delete_confirm.ids = ids;
         self.delete_confirm.from_disk = false;
-        self.delete_confirm.positioned = false;
     }
 
     /// Apply the confirmed delete: remove the records from the list and
@@ -1775,7 +1768,10 @@ impl eframe::App for DmApp {
                         ui.spacing_mut().item_spacing.x = 0.0;
                         // Column-boundary rules: (x center, hovered, dragging).
                         let mut bounds: Vec<(f32, bool, bool)> = Vec::new();
-                        ui.horizontal_centered(|ui| {
+                        // Use horizontal (left-to-right) like the data rows so columns
+                        // line up exactly. horizontal_centered centers items and
+                        // misaligns columns when the total width < available width.
+                        ui.horizontal(|ui| {
                             for (position, &column) in visible_columns.iter().enumerate() {
                                 let width = column_widths[position];
                                 if column == 1 {
@@ -2089,36 +2085,34 @@ impl eframe::App for DmApp {
                                             }
                                         }
                                     });
-                                })
-                                .response
-                                .on_hover_cursor(CursorIcon::Default);
+                                });
 
                             // IDM-style grid rules: vertical cell separators for this
                             // row and a rule under it, spanning the full row height.
-                            {
-                                let rect = row_resp.rect;
-                                for &x in &row_bounds {
-                                    ui.painter().vline(x, rect.y_range(), Stroke::new(1.0, grid_line()));
-                                }
-                                ui.painter().hline(
-                                    rect.x_range(),
-                                    rect.bottom(),
-                                    Stroke::new(1.0, grid_line()),
-                                );
+                            let rect = row_resp.response.rect;
+                            for &x in &row_bounds {
+                                ui.painter().vline(x, rect.y_range(), Stroke::new(1.0, grid_line()));
                             }
+                            ui.painter().hline(
+                                rect.x_range(),
+                                rect.bottom(),
+                                Stroke::new(1.0, grid_line()),
+                            );
 
-                            // Handle selection and double-click to open popout
-                            if row_resp.interact(Sense::click()).clicked() {
+                            // Handle selection and double-click to open popout.
+                            // Use an interact on the full row rect for reliable click/double-click.
+                            let row_interact = ui.interact(rect, egui::Id::new(("download_row", d.id)), Sense::click());
+                            if row_interact.clicked() {
                                 self.selected_download_id = Some(d.id);
                             }
-                            if row_resp.double_clicked() {
+                            if row_interact.double_clicked() {
                                 if !self.active_details_popouts.contains(&d.id) {
                                     self.active_details_popouts.push(d.id);
                                 }
                             }
 
                             // Context menu for the row.
-                            row_resp.context_menu(|ui| {
+                            row_interact.context_menu(|ui| {
                                 if ui.button("Start / Resume").clicked() {
                                     self.selected_download_id = Some(d.id);
                                     self.start_selected();
@@ -2258,31 +2252,24 @@ impl DmApp {
         let viewport_id = ViewportId::from_hash_of("dm-add");
         let mut close_requested = false;
 
+        // Compute initial position: prefer saved position, otherwise center on main window.
+        let initial_pos = self.saved_position(ctx, "add-url", [506.0, 380.0]);
+
         ctx.show_viewport_immediate(
             viewport_id,
             ViewportBuilder::default()
                 .with_title("Add new download...")
                 .with_inner_size([500.0, 340.0])
                 .with_min_inner_size([440.0, 300.0])
-                .with_always_on_top(),
+                .with_always_on_top()
+                .with_position(initial_pos),
             |ctx, _class| {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
                 }
-                // Center the OS window over the main program window
-                // (once per open; `open_add_url` resets the flag).
-                if !self.add_dialog.positioned {
-                    #[cfg(target_os = "windows")]
-                    {
-                        if let Some(pos) = centered_on_main_pos(ctx, 506.0, 380.0) {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
-                            self.add_dialog.positioned = true;
-                        }
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        self.add_dialog.positioned = true;
-                    }
+                // Save window position on move/close
+                if let Some(pos) = ctx.input(|i| i.viewport().outer_rect).map(|r| [r.min.x, r.min.y]) {
+                    self.save_position("add-url", pos);
                 }
                 egui::CentralPanel::default().frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
                     ui.label(RichText::new("Enter new address to download").size(14.0).strong().color(text_main()));
@@ -2384,31 +2371,22 @@ impl DmApp {
         let viewport_id = ViewportId::from_hash_of("dm-delete-confirm");
         let mut close_requested = false;
 
+        let initial_pos = self.saved_position(ctx, "delete-confirm", [446.0, 236.0]);
+
         ctx.show_viewport_immediate(
             viewport_id,
             ViewportBuilder::default()
                 .with_title("Confirm Delete")
                 .with_inner_size([440.0, 196.0])
                 .with_min_inner_size([440.0, 196.0])
-                .with_always_on_top(),
+                .with_always_on_top()
+                .with_position(initial_pos),
             |ctx, _class| {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
                 }
-                // Center the OS window over the main program window
-                // (once per open).
-                if !self.delete_confirm.positioned {
-                    #[cfg(target_os = "windows")]
-                    {
-                        if let Some(pos) = centered_on_main_pos(ctx, 446.0, 236.0) {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
-                            self.delete_confirm.positioned = true;
-                        }
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        self.delete_confirm.positioned = true;
-                    }
+                if let Some(pos) = ctx.input(|i| i.viewport().outer_rect).map(|r| [r.min.x, r.min.y]) {
+                    self.save_position("delete-confirm", pos);
                 }
                 egui::CentralPanel::default()
                     .frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(16.0)))
@@ -2598,16 +2576,22 @@ impl DmApp {
         let viewport_id = ViewportId::from_hash_of("dm-scheduler");
         let mut close_requested = false;
 
+        let initial_pos = self.saved_position(ctx, "scheduler", [486.0, 470.0]);
+
         ctx.show_viewport_immediate(
             viewport_id,
             ViewportBuilder::default()
                 .with_title("Scheduler")
                 .with_inner_size([480.0, 430.0])
                 .with_min_inner_size([420.0, 380.0])
-                .with_always_on_top(),
+                .with_always_on_top()
+                .with_position(initial_pos),
             |ctx, _class| {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
+                }
+                if let Some(pos) = ctx.input(|i| i.viewport().outer_rect).map(|r| [r.min.x, r.min.y]) {
+                    self.save_position("scheduler", pos);
                 }
                 let queues = {
                     let st = self.manager.lock_ui();
@@ -2729,16 +2713,23 @@ impl DmApp {
                 .round() as u64;
             let filename = d.save_path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
+            let key = format!("dl-progress-{}", id);
+            let initial_pos = self.saved_position(ctx, &key, [506.0, 400.0]);
+
             ctx.show_viewport_immediate(
                 viewport_id,
                 ViewportBuilder::default()
                     .with_title(format!("Download status - {}", filename))
                     .with_inner_size([500.0, 360.0])
                     .with_min_inner_size([440.0, 300.0])
-                    .with_always_on_top(),
+                    .with_always_on_top()
+                    .with_position(initial_pos),
                 |ctx, _class| {
                     if ctx.input(|i| i.viewport().close_requested()) {
                         close_requested = true;
+                    }
+                    if let Some(pos) = ctx.input(|i| i.viewport().outer_rect).map(|r| [r.min.x, r.min.y]) {
+                        self.save_position(&key, pos);
                     }
                     egui::CentralPanel::default().frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
                         ui.label(RichText::new(&filename).size(15.0).strong().color(text_main()));
@@ -2890,6 +2881,38 @@ impl DmApp {
         } else {
             self.sort_column = col;
             self.sort_descending = true;
+        }
+    }
+
+    /// Get saved window position for a dialog, or compute centered position as fallback.
+    fn saved_position(&self, ctx: &egui::Context, key: &str, default_size: [f32; 2]) -> egui::Pos2 {
+        let st = self.manager.lock_ui();
+        if st.settings.remember_window_pos {
+            if let Some(pos) = st.settings.window_positions.get(key) {
+                return egui::pos2(pos[0], pos[1]);
+            }
+        }
+        // Fallback: center on main window
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(pos) = centered_on_main_pos(ctx, default_size[0] + 6.0, default_size[1] + 40.0) {
+                return pos;
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // On non-Windows, use a reasonable default
+            return egui::pos2(100.0, 100.0);
+        }
+        egui::pos2(100.0, 100.0)
+    }
+
+    /// Save window position for a dialog.
+    fn save_position(&mut self, key: &str, pos: [f32; 2]) {
+        let mut st = self.manager.lock_ui();
+        if st.settings.remember_window_pos {
+            st.settings.window_positions.insert(key.to_string(), pos);
+            let _ = st.save();
         }
     }
 }
