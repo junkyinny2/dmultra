@@ -51,6 +51,153 @@ fn current_palette() -> options::ThemePalette {
         })
 }
 
+// ---------------------------------------------------------------------------
+// Native (Win32) window helpers: dark title bars and window positioning.
+// Declared with plain FFI like overlay.rs - no extra crate.
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "windows")]
+mod native_win {
+    use std::ffi::c_int;
+    use std::sync::Mutex;
+
+    /// Titles of our own OS windows that must follow the app theme.
+    pub const OUR_TITLES_EXACT: [&str; 4] = ["DM Ultra", "Add new download...", "Scheduler", "Options"];
+    pub const OUR_TITLES_PREFIX: &str = "Download status - ";
+
+    /// Dark title bar message ids (DWMWA_USE_IMMERSIVE_DARK_MODE).
+    const DWMWA_USE_IMMERSIVE_DARK_MODE: c_int = 20;
+
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    pub struct RectL {
+        pub left: i32,
+        pub top: i32,
+        pub right: i32,
+        pub bottom: i32,
+    }
+
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: isize,
+            attr: c_int,
+            value: *const c_int,
+            size: u32,
+        ) -> i32;
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(cb: extern "system" fn(isize, isize) -> i32, lparam: isize) -> i32;
+        fn GetWindowTextW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
+        fn GetWindowRect(hwnd: isize, rect: *mut RectL) -> i32;
+        fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+    }
+
+    static COLLECTED: Mutex<Vec<(isize, String)>> = Mutex::new(Vec::new());
+
+    extern "system" fn collect_cb(hwnd: isize, _lparam: isize) -> i32 {
+        // Only consider windows owned by this process: other applications
+        // may legitimately have windows titled "Options" or "Scheduler".
+        let mut pid: u32 = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, &mut pid);
+        }
+        if pid != std::process::id() {
+            return 1;
+        }
+        const MAX: i32 = 256;
+        let mut buf = [0u16; MAX as usize];
+        let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), MAX) };
+        if len > 0 {
+            let text = String::from_utf16_lossy(&buf[..len as usize]);
+            if let Ok(mut list) = COLLECTED.lock() {
+                list.push((hwnd, text));
+            }
+        }
+        1
+    }
+
+    fn is_ours(text: &str) -> bool {
+        OUR_TITLES_EXACT.contains(&text) || text.starts_with(OUR_TITLES_PREFIX)
+    }
+
+    /// Refresh the snapshot of our top-level windows.
+    fn enumerate() {
+        if let Ok(mut list) = COLLECTED.lock() {
+            list.clear();
+        }
+        unsafe {
+            EnumWindows(collect_cb, 0);
+        }
+    }
+
+    /// Apply dark/light immersive title-bar mode to every window we own.
+    /// Idempotent and cheap; call it whenever the palette changes (and
+    /// periodically, so popouts opened since the last change are included).
+    pub fn apply_titlebar_theme(dark: bool) {
+        enumerate();
+        let val: i32 = if dark { 1 } else { 0 };
+        if let Ok(list) = COLLECTED.lock() {
+            for (hwnd, text) in list.iter() {
+                if !is_ours(text) {
+                    continue;
+                }
+                unsafe {
+                    DwmSetWindowAttribute(
+                        *hwnd,
+                        DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        &val,
+                        std::mem::size_of::<i32>() as u32,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Outer screen rect of the window with exactly `title`, if any.
+    pub fn window_rect(title: &str) -> Option<(i32, i32, i32, i32)> {
+        enumerate();
+        if let Ok(list) = COLLECTED.lock() {
+            for (hwnd, text) in list.iter() {
+                if is_ours(text) && text == title {
+                    let mut rect = RectL::default();
+                    if unsafe { GetWindowRect(*hwnd, &mut rect) } != 0 {
+                        return Some((rect.left, rect.top, rect.right, rect.bottom));
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Position for a centered OS window of the given OUTER size over the
+/// main window. Coordinates are in egui logical points (the
+/// `ViewportCommand::OuterPosition` command converts to physical pixels
+/// using the context's pixels-per-point).
+#[cfg(target_os = "windows")]
+fn centered_on_main_pos(
+    ctx: &egui::Context,
+    outer_w: f32,
+    outer_h: f32,
+) -> Option<egui::Pos2> {
+    let (left, top, right, bottom) = native_win::window_rect("DM Ultra")?;
+    // A minimized window parks at (-32000, -32000); do not center
+    // relative to that.
+    if left < -10_000 || right <= left || bottom <= top {
+        return None;
+    }
+    let ppp = ctx.pixels_per_point();
+    let to_logical = |v: i32| v as f32 / ppp;
+    let main_w = to_logical(right - left);
+    let main_h = to_logical(bottom - top);
+    Some(egui::pos2(
+        to_logical(left) + ((main_w - outer_w) * 0.5).max(0.0),
+        to_logical(top) + ((main_h - outer_h) * 0.5).max(0.0),
+    ))
+}
+
 const COLUMN_LABELS: [&str; 8] = [
     "File Name", "Queue", "Size", "Status", "Time left", "Transfer rate", "Last Try",
     "Description",
@@ -136,8 +283,6 @@ pub enum NavCategory {
     Scheduled,
     Queued,
     Paused,
-    // Bottom docked
-    Trash,
 }
 
 impl NavCategory {
@@ -154,7 +299,6 @@ impl NavCategory {
             NavCategory::Scheduled    => "Scheduled",
             NavCategory::Queued       => "Queued",
             NavCategory::Paused       => "Paused",
-            NavCategory::Trash        => "Trash",
         }
     }
 }
@@ -274,6 +418,8 @@ struct AddUrlDialogState {
     description: String,
     connections: u32,
     error: String,
+    /// Centers the OS window on the main window once per open.
+    positioned: bool,
 }
 
 #[derive(Default)]
@@ -286,6 +432,19 @@ struct SchedulerDialogState {
     once: bool,
     on_finish: String,
     error: String,
+}
+
+/// Confirmation for Delete / Delete All: removes records from the list
+/// and, when the checkbox is ticked, also deletes the files from disk.
+/// (There is no Trash category - deletes here are final.)
+#[derive(Default)]
+struct DeleteConfirmState {
+    open: bool,
+    all: bool,
+    ids: Vec<u64>,
+    from_disk: bool,
+    /// Centers the OS window on the main window once per open.
+    positioned: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +471,7 @@ pub struct DmApp {
     scheduler_dialog: SchedulerDialogState,
     active_details_popouts: Vec<u64>, // IDs of open progress popout viewports
     about_open: bool,
+    delete_confirm: DeleteConfirmState,
 
     // Icons & accent
     icons: IconCache,
@@ -334,6 +494,14 @@ pub struct DmApp {
     sort_descending: bool,
     last_update: Instant,
 
+    // Clipboard watcher (settings.monitor_clipboard); a link copied into
+    // the clipboard opens the Add-URL window (IDM behaviour).
+    last_clip_text: String,
+    clip_last_poll: Instant,
+
+    // Native title-bar theming throttle.
+    titlebar_last_apply: Instant,
+
     // Resizable/reorderable download-list columns
     column_widths: Vec<f32>,
     column_visible: Vec<bool>,
@@ -355,6 +523,15 @@ impl DmApp {
                 column_visible_from_settings(&st.settings),
             )
         };
+        {
+            // The Trash category has been removed; drop any legacy
+            // records it held (their files stay untouched).
+            let mut st = manager.lock_ui();
+            if !st.trash.is_empty() {
+                st.trash.clear();
+                let _ = st.save();
+            }
+        }
 
         Self {
             manager,
@@ -383,6 +560,7 @@ impl DmApp {
             },
             active_details_popouts: Vec::new(),
             about_open: false,
+            delete_confirm: DeleteConfirmState::default(),
             icons: IconCache::new(),
             accent,
             speed_samples: HashMap::new(),
@@ -393,9 +571,20 @@ impl DmApp {
             scheduler_suppressed: HashSet::new(),
             active_queue: None,
             status_bar: "Ready.".to_string(),
-            sort_column: 6, // Last Try
+            // No sort arrow at launch: sorting only activates when the
+            // user clicks a column header.
+            sort_column: usize::MAX,
             sort_descending: true,
             last_update: Instant::now(),
+            last_clip_text: {
+                // Seed with the current clipboard so a link copied
+                // before launch does not trigger the watcher at startup.
+                arboard::Clipboard::new()
+                    .and_then(|mut c| c.get_text())
+                    .unwrap_or_default()
+            },
+            clip_last_poll: Instant::now() - Duration::from_secs(5),
+            titlebar_last_apply: Instant::now() - Duration::from_secs(5),
             column_widths,
             column_visible,
             display_columns: (0..COLUMN_LABELS.len()).collect(),
@@ -423,6 +612,38 @@ impl DmApp {
         self.add_dialog.queue = default_queue;
         self.add_dialog.connections = connections;
         self.add_dialog.error.clear();
+        self.add_dialog.positioned = false;
+    }
+
+    /// Open the Add-URL window prefilled with a URL (clipboard watcher
+    /// hook, IDM-style "link copied -> download box").
+    fn open_add_url_with(&mut self, url: String) {
+        self.open_add_url();
+        self.add_dialog.url = url;
+        self.status_bar = "Download link found in the clipboard.".into();
+    }
+
+    /// Poll the clipboard at most twice per second. A newly seen
+    /// http/https/ftp link opens the Add-URL window prefilled. The
+    /// clipboard is not touched while the dialog is already open, and
+    /// the launch-time clipboard is seeded so stale links do not pop
+    /// the dialog on startup.
+    fn tick_clipboard_watcher(&mut self) {
+        if self.add_dialog.open || self.clip_last_poll.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        self.clip_last_poll = Instant::now();
+        let text = arboard::Clipboard::new()
+            .and_then(|mut c| c.get_text())
+            .unwrap_or_default();
+        if text.is_empty() || text == self.last_clip_text {
+            return;
+        }
+        self.last_clip_text = text.clone();
+        let urls = crate::clipboard::extract_urls(&text);
+        if let Some(url) = urls.into_iter().next() {
+            self.open_add_url_with(url);
+        }
     }
 
     fn open_settings(&mut self) {
@@ -476,19 +697,12 @@ impl DmApp {
 
     fn start_selected(&mut self) {
         match self.selected_download_id {
-            Some(_id) if self.selected_nav == NavCategory::Trash => {
-                self.status_bar = "Restore the download before starting it.".into();
-            }
             Some(id) => self.start_download(id),
             None => self.status_bar = "Select a download first.".into(),
         }
     }
 
     fn start_download(&mut self, id: u64) {
-        if self.selected_nav == NavCategory::Trash {
-            self.status_bar = "Restore the download before starting it.".into();
-            return;
-        }
         if self.manager.is_active(id) {
             self.status_bar = format!("Download #{id} is already running.");
             return;
@@ -529,19 +743,12 @@ impl DmApp {
 
     fn pause_selected(&mut self) {
         match self.selected_download_id {
-            Some(_id) if self.selected_nav == NavCategory::Trash => {
-                self.status_bar = "Restore the download before pausing it.".into();
-            }
             Some(id) => self.pause_download(id),
             None => self.status_bar = "Select a download first.".into(),
         }
     }
 
     fn pause_download(&mut self, id: u64) {
-        if self.selected_nav == NavCategory::Trash {
-            self.status_bar = "Restore the download before pausing it.".into();
-            return;
-        }
         self.manager.stop(id);
         let mut st = self.manager.lock_ui();
         if let Some(d) = st.get_mut(id) {
@@ -573,10 +780,6 @@ impl DmApp {
     }
 
     fn resume_all(&mut self) {
-        if self.selected_nav == NavCategory::Trash {
-            self.status_bar = "Restore downloads before resuming them.".into();
-            return;
-        }
         let to_resume = {
             let st = self.manager.lock_ui();
             st.downloads.iter()
@@ -613,77 +816,124 @@ impl DmApp {
         };
     }
 
+    /// Open the delete confirmation window for the selected download.
     fn delete_selected(&mut self) {
         let Some(id) = self.selected_download_id else {
             self.status_bar = "Select a download first.".into();
             return;
         };
-        if self.selected_nav == NavCategory::Trash {
-            let mut st = self.manager.lock_ui();
-            if let Some(idx) = st.trash.iter().position(|d| d.id == id) {
-                st.trash.remove(idx);
-                let _ = st.save();
-                self.status_bar = format!("Deleted download #{id} permanently.");
-            } else {
-                self.status_bar = format!("Download #{id} is not in Trash.");
-            }
-            self.selected_download_id = None;
-            return;
-        }
-        self.manager.stop(id);
-        let mut st = self.manager.lock_ui();
-        if let Some(idx) = st.downloads.iter().position(|d| d.id == id) {
-            let rec = st.downloads.remove(idx);
-            st.trash.push(rec);
-            let _ = st.save();
-            self.status_bar = format!("Moved download #{id} to Trash.");
-        } else {
+        if !self.manager.lock_ui().downloads.iter().any(|d| d.id == id) {
             self.status_bar = format!("Download #{id} no longer exists.");
-        }
-        self.selected_download_id = None;
-    }
-
-    fn delete_all(&mut self) {
-        if self.selected_nav == NavCategory::Trash {
-            let mut st = self.manager.lock_ui();
-            let count = st.trash.len();
-            st.trash.clear();
-            let _ = st.save();
             self.selected_download_id = None;
-            self.status_bar = if count == 0 {
-                "Trash is already empty.".into()
-            } else {
-                format!("Deleted {count} item(s) from Trash permanently.")
-            };
             return;
         }
-        self.manager.stop_all();
-        let mut st = self.manager.lock_ui();
-        let count = st.downloads.len();
-        while let Some(rec) = st.downloads.pop() {
-            st.trash.push(rec);
-        }
-        let _ = st.save();
-        self.selected_download_id = None;
-        self.status_bar = if count == 0 {
-            "No downloads to delete.".into()
-        } else {
-            format!("Moved all {count} download(s) to Trash.")
-        };
+        self.delete_confirm.open = true;
+        self.delete_confirm.all = false;
+        self.delete_confirm.ids = vec![id];
+        self.delete_confirm.from_disk = false;
+        self.delete_confirm.positioned = false;
     }
 
-    fn restore_download(&mut self, id: u64) {
-        let mut st = self.manager.lock_ui();
-        if let Some(idx) = st.trash.iter().position(|d| d.id == id) {
-            let mut rec = st.trash.remove(idx);
-            rec.status = Status::Queued;
-            st.downloads.push(rec);
-            let _ = st.save();
-            self.status_bar = format!("Restored download #{id} to the download list.");
-            self.selected_nav = NavCategory::AllDownloads;
-            self.selected_download_id = Some(id);
+    /// Open the delete confirmation window for every download in the
+    /// list.
+    fn delete_all(&mut self) {
+        let ids: Vec<u64> = self
+            .manager
+            .lock_ui()
+            .downloads
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        if ids.is_empty() {
+            self.status_bar = "No downloads to delete.".into();
+            return;
+        }
+        self.delete_confirm.open = true;
+        self.delete_confirm.all = true;
+        self.delete_confirm.ids = ids;
+        self.delete_confirm.from_disk = false;
+        self.delete_confirm.positioned = false;
+    }
+
+    /// Apply the confirmed delete: remove the records from the list and
+    /// (optionally) delete the files from disk. Downloads that are still
+    /// running are stopped first, and any engine still writing one of
+    /// these files blocks the removal for this pass (the user simply
+    /// presses Delete again).
+    fn confirm_delete_now(&mut self) {
+        self.delete_confirm.open = false;
+        let ids: Vec<u64> = self.delete_confirm.ids.drain(..).collect();
+        let all = self.delete_confirm.all;
+        let from_disk = self.delete_confirm.from_disk;
+        if ids.is_empty() {
+            return;
+        }
+
+        if all {
+            self.manager.stop_all();
         } else {
-            self.status_bar = format!("Download #{id} is not in Trash.");
+            for &id in &ids {
+                self.manager.stop(id);
+            }
+        }
+        // Engine tasks exit asynchronously; if one of the targets is
+        // still running, ask the user to repeat (it will be stopped by
+        // then). This also prevents the engine's periodic persist from
+        // resurrecting a removed record.
+        let still_running: Vec<u64> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.manager.is_active(*id))
+            .collect();
+        if !still_running.is_empty() {
+            self.status_bar = format!(
+                "Stopped {} download(s); press Delete again to remove them.",
+                still_running.len()
+            );
+            self.delete_confirm.open = false;
+            return;
+        }
+
+        let delete_set: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        let mut removed = 0usize;
+        let mut files_deleted = 0usize;
+        let mut files_failed = 0usize;
+        let mut st = self.manager.lock_ui();
+        let mut kept = Vec::new();
+        for d in st.downloads.drain(..) {
+            if delete_set.contains(&d.id) {
+                removed += 1;
+                if from_disk {
+                    let part_dir = d.temp_dir.join(format!("d{}", d.id));
+                    match std::fs::remove_file(&d.save_path) {
+                        Ok(()) => files_deleted += 1,
+                        Err(_) => files_failed += 1,
+                    }
+                    let _ = std::fs::remove_dir_all(part_dir);
+                }
+            } else {
+                kept.push(d);
+            }
+        }
+        st.downloads = kept;
+        // The Trash category no longer exists; legacy records are gone.
+        st.trash.clear();
+        let _ = st.save();
+        if from_disk {
+            self.delete_confirm.from_disk = false;
+        }
+        drop(st);
+        self.selected_download_id = None;
+        if !from_disk {
+            self.status_bar = format!("Removed {removed} download(s) from the list.");
+        } else if files_failed == 0 {
+            self.status_bar = format!(
+                "Removed {removed} download(s); {files_deleted} file(s) deleted from disk."
+            );
+        } else {
+            self.status_bar = format!(
+                "Removed {removed} download(s); {files_deleted} file(s) deleted, {files_failed} could not be deleted (in use)."
+            );
         }
     }
 
@@ -1125,7 +1375,6 @@ impl DmApp {
             NavCategory::Programs     => st.downloads.iter().filter(|d| is_file_type(&d.save_path, &["exe","msi","apk","iso","img","bin"])).count(),
             NavCategory::Compressed   => st.downloads.iter().filter(|d| is_file_type(&d.save_path, &["zip","rar","7z","tar","gz","bz2","xz"])).count(),
             NavCategory::Scheduled    => st.downloads.iter().filter(|d| d.status == Status::Queued && queue_has_schedule(&st, d.queue.as_deref())).count(),
-            NavCategory::Trash        => st.trash.len(),
         }
     }
 }
@@ -1171,6 +1420,26 @@ impl eframe::App for DmApp {
 
         // Apply styling to egui context
         apply_app_style(ctx);
+
+        // Native title bars (main window + popout windows) follow the
+        // dark-mode theme. Re-applied at 1 Hz so popouts opened since
+        // the last pass are themed too.
+        let dark = options::Appearance::from_settings(&settings_snapshot, system_dark).is_dark();
+        if self.titlebar_last_apply.elapsed() > Duration::from_secs(1) {
+            self.titlebar_last_apply = Instant::now();
+            #[cfg(target_os = "windows")]
+            {
+                native_win::apply_titlebar_theme(dark);
+            }
+        }
+
+        // Clipboard watcher: when enabled, copying a link opens the
+        // Add-URL window (IDM behaviour).
+        if settings_snapshot.monitor_clipboard {
+            self.tick_clipboard_watcher();
+        } else {
+            self.clip_last_poll = Instant::now() - Duration::from_secs(5);
+        }
 
         // Live transfer-rate sampling and schedule enforcement run before
         // the frame is built so the table and status bar show current data.
@@ -1395,8 +1664,8 @@ impl eframe::App for DmApp {
                         .inner_margin(Margin::symmetric(6.0, 6.0)),
                 )
                 .show(ctx, |ui| {
-                    // Sidebar rows are 28 px; the default 3 px inter-row gap
-                    // would push the bottom dock (Trash) into the Paused row.
+                    // Sidebar rows are 28 px; the default 3 px inter-row
+                    // gap pushed into the Paused row of the queue section.
                     ui.spacing_mut().item_spacing.y = 0.0;
 
                     // Header: Categories with [x] close button
@@ -1466,24 +1735,6 @@ impl eframe::App for DmApp {
                         if render_sidebar_item(ui, &icon, cat.label(), count, selected, self.accent) {
                             self.selected_nav = cat;
                         }
-                    }
-
-                    // Trash is docked to the bottom of the sidebar.  Reserve
-                    // the row, its divider, and a little breathing room, then
-                    // push the cursor down to that point.
-                    let reserved = 28.0 + 6.0 + 2.0;
-                    let remaining = ui.available_height();
-                    if remaining > reserved {
-                        ui.add_space(remaining - reserved);
-                    }
-                    ui.separator();
-                    ui.add_space(4.0);
-
-                    let count = self.count_for_category(NavCategory::Trash);
-                    let selected = self.selected_nav == NavCategory::Trash;
-                    let icon = self.icons.get_or_render(ctx, "trash_cat", SVG_DELETE, if selected { self.accent } else { text_dim() }, 16);
-                    if render_sidebar_item(ui, &icon, "Trash", count, selected, self.accent) {
-                        self.selected_nav = NavCategory::Trash;
                     }
 
                     // Thin divider between sidebar and download list (the
@@ -1608,18 +1859,13 @@ impl eframe::App for DmApp {
                 let query = self.search_query.trim().to_lowercase();
                 let mut items: Vec<DownloadRec> = {
                     let st = self.manager.lock_ui();
-                    let source = if self.selected_nav == NavCategory::Trash {
-                        &st.trash
-                    } else {
-                        &st.downloads
-                    };
                     let scheduled_queues: HashSet<&str> = st
                         .schedules
                         .iter()
                         .map(|schedule| schedule.queue.as_str())
                         .collect();
 
-                    source.iter().filter(|d| {
+                    st.downloads.iter().filter(|d| {
                         let is_scheduled = d
                             .queue
                             .as_deref()
@@ -1638,7 +1884,6 @@ impl eframe::App for DmApp {
                             NavCategory::Programs     => is_file_type(&d.save_path, &["exe","msi","apk","iso","img","bin"]),
                             NavCategory::Compressed   => is_file_type(&d.save_path, &["zip","rar","7z","tar","gz","bz2","xz"]),
                             NavCategory::Scheduled    => d.status == Status::Queued && is_scheduled,
-                            NavCategory::Trash        => true,
                         }
                     }).filter(|d| {
                         // Search filter: file name, URL, description, queue.
@@ -1715,8 +1960,9 @@ impl eframe::App for DmApp {
                                                         .file_name()
                                                         .unwrap_or_default()
                                                         .to_string_lossy();
-                                                    ui.add_sized(
-                                                        Vec2::new(width, 18.0),
+                                                    cell_label_left(
+                                                        ui,
+                                                        width,
                                                         egui::Label::new(
                                                             RichText::new(name.as_ref())
                                                                 .size(12.5)
@@ -1727,8 +1973,9 @@ impl eframe::App for DmApp {
                                                 }
                                                 1 => {
                                                     let q_str = d.queue.as_deref().unwrap_or("");
-                                                    ui.add_sized(
-                                                        Vec2::new(width, 18.0),
+                                                    cell_label_left(
+                                                        ui,
+                                                        width,
                                                         egui::Label::new(
                                                             RichText::new(q_str).size(11.0).color(text_dim()),
                                                         )
@@ -1741,11 +1988,13 @@ impl eframe::App for DmApp {
                                                     } else {
                                                         "Unknown".into()
                                                     };
-                                                    ui.add_sized(
-                                                        Vec2::new(width, 18.0),
+                                                    cell_label_left(
+                                                        ui,
+                                                        width,
                                                         egui::Label::new(
                                                             RichText::new(size_str).size(12.0).color(text_dim()),
-                                                        ),
+                                                        )
+                                                        .truncate(true),
                                                     );
                                                 }
                                                 3 => {
@@ -1756,13 +2005,15 @@ impl eframe::App for DmApp {
                                                         Status::Failed => status_failed(),
                                                         Status::Queued => text_dim(),
                                                     };
-                                                    ui.add_sized(
-                                                        Vec2::new(width, 18.0),
+                                                    cell_label_left(
+                                                        ui,
+                                                        width,
                                                         egui::Label::new(
                                                             RichText::new(d.status.as_str())
                                                                 .size(12.0)
                                                                 .color(status_color),
-                                                        ),
+                                                        )
+                                                        .truncate(true),
                                                     );
                                                 }
                                                 4 => {
@@ -1773,11 +2024,13 @@ impl eframe::App for DmApp {
                                                         } else {
                                                             "--".into()
                                                         };
-                                                    ui.add_sized(
-                                                        Vec2::new(width, 18.0),
+                                                    cell_label_left(
+                                                        ui,
+                                                        width,
                                                         egui::Label::new(
                                                             RichText::new(time_left).size(12.0).color(text_dim()),
-                                                        ),
+                                                        )
+                                                        .truncate(true),
                                                     );
                                                 }
                                                 5 => {
@@ -1787,11 +2040,13 @@ impl eframe::App for DmApp {
                                                         } else {
                                                             "--".into()
                                                         };
-                                                    ui.add_sized(
-                                                        Vec2::new(width, 18.0),
+                                                    cell_label_left(
+                                                        ui,
+                                                        width,
                                                         egui::Label::new(
                                                             RichText::new(rate_str).size(12.0).color(text_dim()),
-                                                        ),
+                                                        )
+                                                        .truncate(true),
                                                     );
                                                 }
                                                 6 => {
@@ -1800,16 +2055,19 @@ impl eframe::App for DmApp {
                                                     } else {
                                                         "".into()
                                                     };
-                                                    ui.add_sized(
-                                                        Vec2::new(width, 18.0),
+                                                    cell_label_left(
+                                                        ui,
+                                                        width,
                                                         egui::Label::new(
                                                             RichText::new(date_str).size(12.0).color(text_dim()),
-                                                        ),
+                                                        )
+                                                        .truncate(true),
                                                     );
                                                 }
                                                 7 => {
-                                                    ui.add_sized(
-                                                        Vec2::new(width, 18.0),
+                                                    cell_label_left(
+                                                        ui,
+                                                        width,
                                                         egui::Label::new(
                                                             RichText::new(&d.description)
                                                                 .size(12.0)
@@ -1853,41 +2111,14 @@ impl eframe::App for DmApp {
                             if row_resp.interact(Sense::click()).clicked() {
                                 self.selected_download_id = Some(d.id);
                             }
-                            if row_resp.double_clicked()
-                                && self.selected_nav != NavCategory::Trash
-                            {
+                            if row_resp.double_clicked() {
                                 if !self.active_details_popouts.contains(&d.id) {
                                     self.active_details_popouts.push(d.id);
                                 }
                             }
 
-                            // Context menu (Trash rows get restore/delete
-                            // actions instead of download controls).
+                            // Context menu for the row.
                             row_resp.context_menu(|ui| {
-                                if self.selected_nav == NavCategory::Trash {
-                                    if ui.button("Restore").clicked() {
-                                        self.restore_download(d.id);
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Delete Permanently").clicked() {
-                                        self.selected_download_id = Some(d.id);
-                                        self.delete_selected();
-                                        ui.close_menu();
-                                    }
-                                    ui.separator();
-                                    if ui.button("Copy Download URL").clicked() {
-                                        ctx.output_mut(|o| o.copied_text = d.url.clone());
-                                        self.status_bar = "URL copied to clipboard.".into();
-                                        ui.close_menu();
-                                    }
-                                    ui.separator();
-                                    if ui.button("Empty Trash").clicked() {
-                                        self.delete_all();
-                                        ui.close_menu();
-                                    }
-                                    return;
-                                }
-
                                 if ui.button("Start / Resume").clicked() {
                                     self.selected_download_id = Some(d.id);
                                     self.start_selected();
@@ -1941,6 +2172,11 @@ impl eframe::App for DmApp {
         // A. Add URL Dialog (Separate OS Window)
         if self.add_dialog.open {
             self.show_add_url_viewport(ctx);
+        }
+
+        // A2. Delete Confirmation (Separate OS Window)
+        if self.delete_confirm.open {
+            self.show_delete_confirm_viewport(ctx);
         }
 
         // B. Settings Dialog (options::SettingsDialog)
@@ -2033,6 +2269,21 @@ impl DmApp {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
                 }
+                // Center the OS window over the main program window
+                // (once per open; `open_add_url` resets the flag).
+                if !self.add_dialog.positioned {
+                    #[cfg(target_os = "windows")]
+                    {
+                        if let Some(pos) = centered_on_main_pos(ctx, 506.0, 380.0) {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+                            self.add_dialog.positioned = true;
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        self.add_dialog.positioned = true;
+                    }
+                }
                 egui::CentralPanel::default().frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
                     ui.label(RichText::new("Enter new address to download").size(14.0).strong().color(text_main()));
                     ui.add_space(8.0);
@@ -2123,6 +2374,103 @@ impl DmApp {
 
         if close_requested {
             self.add_dialog.open = false;
+        }
+    }
+
+    /// Delete-confirmation window (a separate OS window like the other
+    /// download dialogs). Offers the checkbox that also removes the
+    /// file(s) from the disk, not just from the download list.
+    fn show_delete_confirm_viewport(&mut self, ctx: &egui::Context) {
+        let viewport_id = ViewportId::from_hash_of("dm-delete-confirm");
+        let mut close_requested = false;
+
+        ctx.show_viewport_immediate(
+            viewport_id,
+            ViewportBuilder::default()
+                .with_title("Confirm Delete")
+                .with_inner_size([440.0, 196.0])
+                .with_min_inner_size([440.0, 196.0])
+                .with_always_on_top(),
+            |ctx, _class| {
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    close_requested = true;
+                }
+                // Center the OS window over the main program window
+                // (once per open).
+                if !self.delete_confirm.positioned {
+                    #[cfg(target_os = "windows")]
+                    {
+                        if let Some(pos) = centered_on_main_pos(ctx, 446.0, 236.0) {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+                            self.delete_confirm.positioned = true;
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        self.delete_confirm.positioned = true;
+                    }
+                }
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(16.0)))
+                    .show(ctx, |ui| {
+                        let count = self.delete_confirm.ids.len();
+                        let subject = if self.delete_confirm.all {
+                            format!("all {count} download(s)")
+                        } else {
+                            let first = self.delete_confirm.ids.first().copied().unwrap_or(0);
+                            let name = {
+                                let st = self.manager.lock_ui();
+                                st.downloads
+                                    .iter()
+                                    .find(|d| d.id == first)
+                                    .map(|d| file_name_of(d))
+                                    .unwrap_or_else(|| format!("download #{first}"))
+                            };
+                            format!("\"{name}\"")
+                        };
+                        ui.label(
+                            RichText::new(format!("Delete {subject} from the list?"))
+                                .size(14.0)
+                                .strong()
+                                .color(text_main()),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("This removes the download record. It cannot be undone.")
+                                .size(12.0)
+                                .color(text_dim()),
+                        );
+                        ui.add_space(10.0);
+                        if ui
+                            .checkbox(
+                                &mut self.delete_confirm.from_disk,
+                                RichText::new("Also delete the file(s) from the disk")
+                                    .color(text_main()),
+                            )
+                            .changed()
+                        {
+                            // No extra action needed; the flag is read on confirm.
+                        }
+                        ui.add_space(12.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(RichText::new("  Delete  ").color(status_failed()))
+                                .clicked()
+                            {
+                                self.confirm_delete_now();
+                            }
+                            if ui.button(RichText::new("  Cancel  ").color(text_main())).clicked() {
+                                self.delete_confirm.open = false;
+                            }
+                        });
+                    });
+            },
+        );
+
+        if close_requested {
+            self.delete_confirm.open = false;
         }
     }
 
@@ -2549,6 +2897,22 @@ impl DmApp {
 // ---------------------------------------------------------------------------
 // Helpers & Components
 // ---------------------------------------------------------------------------
+
+/// Left-aligned table-cell label. `ui.add_sized` uses a centered layout,
+/// which pushed short cell text to the middle whenever a column was
+/// stretched; IDM keeps all cell text flush left regardless of width.
+fn cell_label_left(ui: &mut Ui, width: f32, label: egui::Label) {
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 18.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            // Hard cap so wide content truncates at the cell boundary
+            // instead of spilling under the grid rule.
+            ui.set_max_width(width);
+            ui.add(label);
+        },
+    );
+}
 
 fn render_toolbar_button(
     ui: &mut Ui,
