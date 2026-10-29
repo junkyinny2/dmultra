@@ -2124,14 +2124,12 @@ impl DmApp {
 
                         let total = if d.file_size > 0 { d.file_size } else { stats.as_ref().map(|s| s.total()).unwrap_or(0) };
                         let downloaded = stats.as_ref().map(|s| s.bytes()).unwrap_or_else(|| d.total_downloaded());
-                        let fraction = if total > 0 { (downloaded as f32 / total as f32).min(1.0) } else { 0.0 };
-                        let percent = (fraction * 100.0).round() as u32;
-
-                        let progress_bar = egui::ProgressBar::new(fraction)
-                            .text(format!("{percent}%"))
-                            .fill(STATUS_DOWNLOADING)
-                            .desired_height(24.0);
-                        ui.add_sized([ui.available_width(), 24.0], progress_bar);
+                        render_segmented_progress(
+                            ui,
+                            total,
+                            downloaded,
+                            stats.as_ref().map(|s| s.segments()).unwrap_or_default().as_slice(),
+                        );
                         ui.add_space(8.0);
 
                         egui::Grid::new(("progress_grid", id))
@@ -2336,6 +2334,91 @@ fn render_sidebar_item(
     resp.interact(Sense::click())
         .on_hover_cursor(CursorIcon::Default)
         .clicked()
+}
+
+/// One progress line divided into colored connection segments, like the
+/// original DM Ultra progress window. Each segment owns a byte range of the
+/// final file and is painted in its own color; together they form the full
+/// progress bar.
+fn render_segmented_progress(
+    ui: &mut Ui,
+    total: u64,
+    downloaded: u64,
+    segments: &[crate::manager::Segment],
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    painter.rect_filled(rect, Rounding::same(4.0), Color32::from_rgb(30, 40, 59));
+
+    if total > 0 {
+        let palette = [
+            Color32::from_rgb(57, 133, 245),
+            Color32::from_rgb(33, 196, 93),
+            Color32::from_rgb(230, 165, 50),
+            Color32::from_rgb(139, 92, 246),
+            Color32::from_rgb(244, 63, 94),
+            Color32::from_rgb(6, 182, 212),
+            Color32::from_rgb(234, 179, 8),
+            Color32::from_rgb(236, 72, 153),
+        ];
+
+        if segments.is_empty() {
+            let filled = rect.left() + (downloaded as f32 / total as f32) * rect.width();
+            painter.rect_filled(
+                Rect::from_min_max(pos2(rect.left(), rect.top()), pos2(filled, rect.bottom())),
+                Rounding::same(4.0),
+                palette[0],
+            );
+        } else {
+            for (index, segment) in segments.iter().enumerate() {
+                let segment_len = if segment.len > 0 {
+                    segment.len
+                } else {
+                    segment.end.saturating_sub(segment.start).max(1)
+                };
+                let segment_downloaded = segment.downloaded.min(segment_len);
+                let x0 = rect.left() + (segment.start as f32 / total as f32) * rect.width();
+                let x1 = rect.left()
+                    + (segment.end.min(total) as f32 / total as f32) * rect.width();
+                let filled_x = x0 + (segment_downloaded as f32 / segment_len as f32) * (x1 - x0);
+                let color = palette[index % palette.len()];
+                if filled_x > x0 {
+                    painter.rect_filled(
+                        Rect::from_min_max(pos2(x0, rect.top()), pos2(filled_x, rect.bottom())),
+                        Rounding::same(0.0),
+                        color,
+                    );
+                }
+            }
+
+            // Thin separators between connection ranges.
+            for segment in segments {
+                let x = rect.left() + (segment.start as f32 / total as f32) * rect.width();
+                painter.vline(x, rect.y_range(), Stroke::new(1.0, BG_DARK));
+            }
+        }
+    } else if downloaded > 0 {
+        // Unknown total size: show an indeterminate filled bar.
+        painter.rect_filled(rect.shrink(1.0), Rounding::same(4.0), Color32::from_rgb(57, 133, 245));
+    }
+
+    let percent = if total > 0 {
+        (downloaded as f32 / total as f32 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        format!("{percent:.0}%"),
+        FontId::proportional(12.0),
+        Color32::WHITE,
+    );
+    painter.rect_stroke(rect, Rounding::same(4.0), Stroke::new(1.0, BORDER_HAIRLINE));
+
+    response
 }
 
 fn apply_app_style(ctx: &egui::Context) {
