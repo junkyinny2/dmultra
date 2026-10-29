@@ -968,8 +968,13 @@ impl SettingsDialog {
         style.visuals.widgets.active.bg_fill = pal.accent;
         style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, pal.accent);
         style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
+        style.visuals.widgets.noninteractive.bg_fill = pal.background;
+        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, pal.border);
+        style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, pal.text);
         style.visuals.selection.bg_fill = pal.accent;
         style.visuals.selection.stroke = egui::Stroke::new(1.0, Color32::WHITE);
+        style.visuals.window_stroke = egui::Stroke::new(1.0, pal.border);
+        style.visuals.popup_shadow = egui::epaint::Shadow::NONE;
         style.visuals.selection.stroke = egui::Stroke::new(1.0, Color32::WHITE);
         style.interaction.selectable_labels = false;
         ctx.set_style(style);

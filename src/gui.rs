@@ -2677,6 +2677,9 @@ fn apply_app_style(ctx: &egui::Context) {
     style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, text_dim());
     style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, text_main());
     style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, text_main());
+    style.visuals.widgets.noninteractive.bg_fill = bg_dark();
+    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border_hairline());
+    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, text_main());
     style.visuals.selection.bg_fill = bg_row_selected();
     style.visuals.selection.stroke = Stroke::new(1.0, text_main());
     style.visuals.window_stroke = Stroke::new(1.0, border_hairline());
