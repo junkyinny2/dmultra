@@ -2124,7 +2124,11 @@ impl DmApp {
                         let downloaded = stats.as_ref().map(|s| s.bytes()).unwrap_or_else(|| d.total_downloaded());
                         let fraction = if total > 0 { (downloaded as f32 / total as f32).min(1.0) } else { 0.0 };
 
-                        ui.add(egui::ProgressBar::new(fraction).show_percentage());
+                        let progress_bar = egui::ProgressBar::new(fraction)
+                            .show_percentage()
+                            .fill(STATUS_DOWNLOADING)
+                            .desired_height(20.0);
+                        ui.add_sized([ui.available_width(), 20.0], progress_bar);
                         ui.add_space(6.0);
 
                         ui.label(RichText::new(format!("Downloaded: {} / {}", human_bytes(downloaded), if total > 0 { human_bytes(total) } else { "Unknown".into() })).color(TEXT_DIM));
@@ -2147,7 +2151,10 @@ impl DmApp {
                                 ui.horizontal_wrapped(|ui| {
                                     for (_i, seg) in segs.iter().enumerate() {
                                         let frac = if seg.len > 0 { (seg.downloaded as f32 / seg.len as f32).min(1.0) } else { 0.0 };
-                                        ui.add_sized(Vec2::new(50.0, 10.0), egui::ProgressBar::new(frac));
+                                        ui.add_sized(
+                                            Vec2::new(50.0, 10.0),
+                                            egui::ProgressBar::new(frac).fill(STATUS_DOWNLOADING),
+                                        );
                                     }
                                 });
                             }
