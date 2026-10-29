@@ -234,6 +234,10 @@ fn column_tracks(widths: &[f32], visible: &[bool]) -> Vec<ColumnTrack> {
         .collect()
 }
 
+fn resized_column_width(current_width: f32, frame_delta: f32, column: usize) -> f32 {
+    (current_width + frame_delta).clamp(MIN_COLUMN_WIDTHS[column], MAX_COLUMN_WIDTH)
+}
+
 // ---------------------------------------------------------------------------
 // Embedded Lucide SVG Icons from assets/icons
 // ---------------------------------------------------------------------------
@@ -488,7 +492,6 @@ pub struct DmApp {
 
     // Resizable/reorderable download-list columns
     column_widths: Vec<f32>,
-    column_resize_start: Option<(usize, f32)>,
     column_visible: Vec<bool>,
 }
 
@@ -567,7 +570,6 @@ impl DmApp {
             clip_last_poll: Instant::now() - Duration::from_secs(5),
             titlebar_last_apply: Instant::now() - Duration::from_secs(5),
             column_widths,
-            column_resize_start: None,
             column_visible,
         }
     }
@@ -1810,24 +1812,16 @@ impl eframe::App for DmApp {
                                     handle_resp.hovered(),
                                     handle_resp.dragged(),
                                 ));
-                                if handle_resp.drag_started() {
-                                    self.column_resize_start =
-                                        Some((track.column, self.column_widths[track.column]));
-                                }
                                 if handle_resp.dragged() {
-                                    let start_width = self
-                                        .column_resize_start
-                                        .filter(|(index, _)| *index == track.column)
-                                        .map(|(_, width)| width)
-                                        .unwrap_or(self.column_widths[track.column]);
-                                    self.column_widths[track.column] = (start_width
-                                        + handle_resp.drag_delta().x)
-                                        .clamp(MIN_COLUMN_WIDTHS[track.column], MAX_COLUMN_WIDTH);
+                                    self.column_widths[track.column] = resized_column_width(
+                                        self.column_widths[track.column],
+                                        handle_resp.drag_delta().x,
+                                        track.column,
+                                    );
                                     ctx.request_repaint();
                                 }
                                 if handle_resp.drag_stopped() {
                                     self.save_column_settings();
-                                    self.column_resize_start = None;
                                 }
                             }
                         });
@@ -3016,6 +3010,22 @@ mod table_cell_tests {
         assert_eq!(widths[1], DEFAULT_COLUMN_WIDTHS[1]);
         assert_eq!(widths[2], 80.0);
         assert_eq!(widths[7], MAX_COLUMN_WIDTH);
+    }
+
+    #[test]
+    fn column_resize_accumulates_frame_deltas_and_clamps_at_limits() {
+        let column = 0;
+        let width = resized_column_width(
+            resized_column_width(200.0, 12.0, column),
+            9.0,
+            column,
+        );
+        assert_eq!(width, 221.0);
+        assert_eq!(resized_column_width(width, -1000.0, column), MIN_COLUMN_WIDTHS[column]);
+        assert_eq!(
+            resized_column_width(MAX_COLUMN_WIDTH - 1.0, 10.0, column),
+            MAX_COLUMN_WIDTH
+        );
     }
 }
 
