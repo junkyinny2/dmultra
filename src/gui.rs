@@ -2116,51 +2116,67 @@ impl DmApp {
                         close_requested = true;
                     }
                     egui::CentralPanel::default().frame(egui::Frame::none().fill(BG_PANEL).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
-                        ui.label(RichText::new(&filename).size(14.0).strong().color(TEXT_MAIN));
+                        ui.label(RichText::new(&filename).size(15.0).strong().color(TEXT_MAIN));
                         ui.add(egui::Label::new(RichText::new(&d.url).size(11.0).color(TEXT_DIM)).truncate(true));
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(format!("Save to: {}", d.save_path.display())).size(11.0).color(TEXT_DIM));
                         ui.add_space(8.0);
 
                         let total = if d.file_size > 0 { d.file_size } else { stats.as_ref().map(|s| s.total()).unwrap_or(0) };
                         let downloaded = stats.as_ref().map(|s| s.bytes()).unwrap_or_else(|| d.total_downloaded());
                         let fraction = if total > 0 { (downloaded as f32 / total as f32).min(1.0) } else { 0.0 };
+                        let percent = (fraction * 100.0).round() as u32;
 
                         let progress_bar = egui::ProgressBar::new(fraction)
-                            .show_percentage()
+                            .text(format!("{percent}%"))
                             .fill(STATUS_DOWNLOADING)
-                            .desired_height(20.0);
-                        ui.add_sized([ui.available_width(), 20.0], progress_bar);
-                        ui.add_space(6.0);
+                            .desired_height(24.0);
+                        ui.add_sized([ui.available_width(), 24.0], progress_bar);
+                        ui.add_space(8.0);
 
-                        ui.label(RichText::new(format!("Downloaded: {} / {}", human_bytes(downloaded), if total > 0 { human_bytes(total) } else { "Unknown".into() })).color(TEXT_DIM));
-                        ui.label(RichText::new(format!("Status: {}", d.status.as_str())).color(TEXT_MAIN));
-                        ui.label(RichText::new(format!("Transfer rate: {}", if d.status == Status::Downloading && speed_bps > 0 { format!("{}/s", human_bytes(speed_bps)) } else { "--".into() })).color(TEXT_DIM));
-                        let eta = if d.status == Status::Downloading && speed_bps > 0 && total > downloaded {
-                            format_eta(total.saturating_sub(downloaded), speed_bps)
-                        } else {
-                            "--".into()
-                        };
-                        ui.label(RichText::new(format!("Time left: {}", eta)).color(TEXT_DIM));
-                        ui.label(RichText::new(format!("Queue: {}", d.queue.as_deref().unwrap_or("Main download queue"))).color(TEXT_DIM));
+                        egui::Grid::new(("progress_grid", id))
+                            .num_columns(2)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label(RichText::new("Downloaded:").color(TEXT_DIM));
+                                ui.label(RichText::new(format!("{} / {}", human_bytes(downloaded), if total > 0 { human_bytes(total) } else { "Unknown".to_string() })).color(TEXT_MAIN));
+                                ui.end_row();
 
-                        // Segment bars
-                        if let Some(ref st) = stats {
-                            let segs = st.segments();
-                            if !segs.is_empty() {
-                                ui.add_space(6.0);
-                                ui.label(RichText::new("Connections:").size(11.0).color(TEXT_DIM));
-                                ui.horizontal_wrapped(|ui| {
-                                    for (_i, seg) in segs.iter().enumerate() {
-                                        let frac = if seg.len > 0 { (seg.downloaded as f32 / seg.len as f32).min(1.0) } else { 0.0 };
-                                        ui.add_sized(
-                                            Vec2::new(50.0, 10.0),
-                                            egui::ProgressBar::new(frac).fill(STATUS_DOWNLOADING),
-                                        );
-                                    }
-                                });
-                            }
-                        }
+                                ui.label(RichText::new("Transfer rate:").color(TEXT_DIM));
+                                ui.label(RichText::new(if d.status == Status::Downloading && speed_bps > 0 {
+                                    format!("{}/s", human_bytes(speed_bps))
+                                } else {
+                                    "--".to_string()
+                                }).color(TEXT_MAIN));
+                                ui.end_row();
 
-                        ui.add_space(14.0);
+                                let eta = if d.status == Status::Downloading && speed_bps > 0 && total > downloaded {
+                                    format_eta(total.saturating_sub(downloaded), speed_bps)
+                                } else {
+                                    "--".to_string()
+                                };
+                                ui.label(RichText::new("Time left:").color(TEXT_DIM));
+                                ui.label(RichText::new(eta).color(TEXT_MAIN));
+                                ui.end_row();
+
+                                ui.label(RichText::new("Status:").color(TEXT_DIM));
+                                ui.label(RichText::new(d.status.as_str()).color(TEXT_MAIN));
+                                ui.end_row();
+
+                                ui.label(RichText::new("Connections:").color(TEXT_DIM));
+                                let connections = stats
+                                    .as_ref()
+                                    .map(|s| s.segments().len())
+                                    .unwrap_or(d.max_connections.unwrap_or(1) as usize);
+                                ui.label(RichText::new(connections.to_string()).color(TEXT_MAIN));
+                                ui.end_row();
+
+                                ui.label(RichText::new("Resumable:").color(TEXT_DIM));
+                                ui.label(RichText::new(if d.resumable { "Yes" } else { "No" }).color(TEXT_MAIN));
+                                ui.end_row();
+                            });
+
+                        ui.add_space(12.0);
                         ui.horizontal(|ui| {
                             if d.status == Status::Downloading {
                                 if ui.button(" Pause ").clicked() {
@@ -2170,6 +2186,9 @@ impl DmApp {
                                 if ui.button(" Resume ").clicked() {
                                     self.start_download(id);
                                 }
+                            }
+                            if ui.button(" Open ").clicked() {
+                                let _ = std::process::Command::new("explorer").arg(&d.save_path).spawn();
                             }
                             if ui.button(" Open Folder ").clicked() {
                                 if let Some(parent) = d.save_path.parent() {
