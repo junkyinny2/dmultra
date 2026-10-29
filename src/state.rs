@@ -316,6 +316,10 @@ pub struct Settings {
     /// Time left, Transfer rate, Last Try). Empty = use defaults; the
     /// Description column always takes the remaining width.
     pub list_col_widths: Vec<f32>,
+    /// Visibility of the main downloads list columns (File Name, Queue,
+    /// Size, Status, Time left, Transfer rate, Last Try, Description).
+    #[serde(default)]
+    pub list_col_visible: Vec<bool>,
     /// Restore the main window and secondary dialogs to their last known
     /// positions on launch.
     pub remember_window_pos: bool,
@@ -402,7 +406,7 @@ impl Default for Settings {
             proxies: Proxies::default(),
             theme_mode: "system".into(),
             light_theme: "defaultLight".into(),
-            dark_theme: "defaultDark".into(),
+            dark_theme: "dmUltra".into(),
             accent: "blue".into(),
             ui_scale: 100,
             font_size: 13.0,
@@ -429,6 +433,7 @@ impl Default for Settings {
             category_dirs: false,
             idle_file_scan: false,
             list_col_widths: Vec::new(),
+            list_col_visible: vec![true; 8],
             remember_window_pos: true,
             window_positions: std::collections::BTreeMap::new(),
             browser_auto_download: false,

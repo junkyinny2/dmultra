@@ -30,6 +30,33 @@ use crate::state::{DownloadRec, State, Status};
 
 const APP_VERSION: &str = include_str!("../VERSION");
 
+static CURRENT_PALETTE: Mutex<Option<options::ThemePalette>> = Mutex::new(None);
+
+fn current_palette() -> options::ThemePalette {
+    CURRENT_PALETTE
+        .lock()
+        .ok()
+        .and_then(|guard| *guard)
+        .unwrap_or_else(|| {
+            options::Appearance {
+                mode: "dark".into(),
+                light_theme: "defaultLight".into(),
+                dark_theme: "dmUltra".into(),
+                accent: "blue".into(),
+                ui_scale: 100,
+                font_size: 13.0,
+                system_dark: true,
+            }
+            .palette()
+        })
+}
+
+const COLUMN_LABELS: [&str; 8] = [
+    "File Name", "Queue", "Size", "Status", "Time left", "Transfer rate", "Last Try",
+    "Description",
+];
+const DEFAULT_COLUMN_WIDTHS: [f32; 8] = [220.0, 28.0, 72.0, 90.0, 80.0, 90.0, 90.0, 120.0];
+
 // ---------------------------------------------------------------------------
 // Embedded Lucide SVG Icons from assets/icons
 // ---------------------------------------------------------------------------
@@ -55,34 +82,34 @@ const SVG_QUEUE: &[u8] = include_bytes!("../assets/icons/list.svg");
 const SVG_SEARCH: &[u8] = include_bytes!("../assets/icons/search.svg");
 
 // ---------------------------------------------------------------------------
-// Theme Palette (sampled directly from the reference dark UI)
+// Theme Palette (dynamic: follows the saved appearance settings)
 // ---------------------------------------------------------------------------
-const BG_DARK: Color32 = Color32::from_rgb(15, 23, 42);        // #0F172A main window bg
-const BG_PANEL: Color32 = Color32::from_rgb(20, 29, 48);       // #141D30 toolbar & sidebar bg
-const BG_HEADER: Color32 = Color32::from_rgb(20, 29, 48);      // #141D30 table header
-const BG_ROW_EVEN: Color32 = Color32::from_rgb(30, 40, 59);    // #1E283B alternating row
-const BG_ROW_ODD: Color32 = Color32::from_rgb(32, 43, 62);     // #202B3E alternating row
-const BG_ROW_HOVER: Color32 = Color32::from_rgb(38, 51, 72);
-const BG_ROW_SELECTED: Color32 = Color32::from_rgb(48, 61, 81); // #303D51
-const BG_PILL_SELECTED: Color32 = Color32::from_rgb(48, 61, 81); // sidebar selection capsule
-const BG_BADGE: Color32 = Color32::from_rgb(38, 50, 70);
-const BG_BADGE_SEL: Color32 = Color32::from_rgb(48, 61, 81);
+fn bg_dark() -> Color32 { current_palette().background }
+fn bg_panel() -> Color32 { current_palette().surface }
+fn bg_header() -> Color32 { current_palette().chrome }
+fn bg_row_even() -> Color32 { current_palette().surface }
+fn bg_row_odd() -> Color32 { current_palette().surface2 }
+fn bg_row_hover() -> Color32 { current_palette().row_hover }
+fn bg_row_selected() -> Color32 { current_palette().nav_selected }
+fn bg_pill_selected() -> Color32 { current_palette().nav_selected }
+fn bg_badge() -> Color32 { current_palette().surface2 }
+fn bg_badge_sel() -> Color32 { current_palette().nav_selected }
 
-const BORDER_HAIRLINE: Color32 = Color32::from_rgb(42, 54, 74);
+fn border_hairline() -> Color32 { current_palette().hairline }
 
-const TEXT_MAIN: Color32 = Color32::from_rgb(214, 217, 224);   // #D6D9E0
-const TEXT_DIM: Color32 = Color32::from_rgb(146, 153, 165);    // #9299A5
-const TEXT_BADGE: Color32 = Color32::from_rgb(154, 166, 184);
-const TEXT_EMPTY_TITLE: Color32 = Color32::from_rgb(146, 153, 165);
-const TEXT_EMPTY_SUB: Color32 = Color32::from_rgb(122, 132, 148);
+fn text_main() -> Color32 { current_palette().text }
+fn text_dim() -> Color32 { current_palette().muted }
+fn text_badge() -> Color32 { current_palette().muted }
+fn text_empty_title() -> Color32 { current_palette().muted }
+fn text_empty_sub() -> Color32 { current_palette().text_tertiary }
 
 const ACCENT_BLUE: Color32 = Color32::from_rgb(57, 133, 245);  // #3985F5 (Add URL)
 const ACCENT_GREEN: Color32 = Color32::from_rgb(33, 196, 93);  // #21C45D (Resume All)
 const ACCENT_RED: Color32 = Color32::from_rgb(216, 64, 66);    // #D84042 (Delete All)
-const STATUS_COMPLETE: Color32 = Color32::from_rgb(33, 196, 93);
-const STATUS_DOWNLOADING: Color32 = Color32::from_rgb(57, 133, 245);
-const STATUS_PAUSED: Color32 = Color32::from_rgb(230, 165, 50);
-const STATUS_FAILED: Color32 = Color32::from_rgb(235, 75, 75);
+fn status_complete() -> Color32 { current_palette().success }
+fn status_downloading() -> Color32 { current_palette().accent }
+fn status_paused() -> Color32 { current_palette().warning }
+fn status_failed() -> Color32 { current_palette().destructive }
 
 // ---------------------------------------------------------------------------
 // Category definitions matching the sidebar
@@ -298,15 +325,24 @@ pub struct DmApp {
     sort_column: usize,
     sort_descending: bool,
     last_update: Instant,
+
+    // Resizable/reorderable download-list columns
+    column_widths: Vec<f32>,
+    column_visible: Vec<bool>,
+    columns_dragging: bool,
 }
 
 impl DmApp {
     pub fn new(manager: Arc<Manager>) -> Self {
         let show_flag = Arc::new(Mutex::new(false));
         let tray_icon = create_tray_icon(show_flag.clone()).ok();
-        let accent = {
+        let (accent, column_widths, column_visible) = {
             let st = manager.lock_ui();
-            options::accent_color(&st.settings.accent)
+            (
+                ui_accent(&st.settings.accent),
+                column_widths_from_settings(&st.settings),
+                column_visible_from_settings(&st.settings),
+            )
         };
 
         Self {
@@ -349,6 +385,9 @@ impl DmApp {
             sort_column: 6, // Last Try
             sort_descending: true,
             last_update: Instant::now(),
+            column_widths,
+            column_visible,
+            columns_dragging: false,
         }
     }
 
@@ -648,6 +687,33 @@ impl DmApp {
             .count()
     }
 
+    fn column_layout(&self, available: f32) -> (Vec<usize>, Vec<f32>) {
+        let visible: Vec<usize> = (0..8)
+            .filter(|&index| self.column_visible.get(index).copied().unwrap_or(true))
+            .collect();
+        let mut widths: Vec<f32> = visible
+            .iter()
+            .map(|&index| {
+                self.column_widths
+                    .get(index)
+                    .copied()
+                    .unwrap_or(DEFAULT_COLUMN_WIDTHS[index])
+            })
+            .collect();
+        let sum: f32 = widths.iter().sum();
+        if let Some(last) = widths.last_mut() {
+            *last = (*last + (available - sum)).max(40.0);
+        }
+        (visible, widths)
+    }
+
+    fn save_column_settings(&mut self) {
+        let mut state = self.manager.lock_ui();
+        state.settings.list_col_widths = self.column_widths.clone();
+        state.settings.list_col_visible = self.column_visible.clone();
+        let _ = state.save();
+    }
+
     /// Sample live transfer rates from the manager's byte counters. The
     /// display is smoothed over ~0.4 s samples so it stays readable.
     fn sample_speeds(&mut self) {
@@ -812,8 +878,8 @@ impl DmApp {
             .fixed_pos(anchor)
             .show(ctx, |ui| {
                 egui::Frame::none()
-                    .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
+                    .fill(bg_panel())
+                    .stroke(Stroke::new(1.0, border_hairline()))
                     .rounding(Rounding::same(4.0))
                     .inner_margin(Margin::same(8.0))
                     .show(ui, |ui| {
@@ -836,7 +902,7 @@ impl DmApp {
                             ui.label(
                                 RichText::new("File name, URL, description or queue")
                                     .size(10.5)
-                                    .color(TEXT_DIM),
+                                    .color(text_dim()),
                             );
                             if !self.search_query.is_empty()
                                 && ui.button("Clear").clicked()
@@ -977,27 +1043,27 @@ impl DmApp {
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .frame(
                 egui::Frame::window(&ctx.style())
-                    .fill(BG_PANEL)
+                    .fill(bg_panel())
                     .inner_margin(Margin::same(16.0)),
             )
             .show(ctx, |ui| {
                 ui.set_min_width(300.0);
-                ui.label(RichText::new("DM Ultra").size(20.0).strong().color(TEXT_MAIN));
+                ui.label(RichText::new("DM Ultra").size(20.0).strong().color(text_main()));
                 ui.label(
                     RichText::new(format!("Version {}", APP_VERSION.trim()))
                         .size(12.0)
-                        .color(TEXT_DIM),
+                        .color(text_dim()),
                 );
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new("Multi-threaded download manager for Windows.")
-                        .color(TEXT_MAIN),
+                        .color(text_main()),
                 );
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new("Local use only. No accounts, telemetry, or cloud services.")
                         .size(11.5)
-                        .color(TEXT_DIM),
+                        .color(text_dim()),
                 );
                 ui.add_space(12.0);
                 if ui.button("Close").clicked() {
@@ -1055,7 +1121,17 @@ impl eframe::App for DmApp {
             ctx.request_repaint();
         }
 
-        // Apply dark styling to egui context
+        // Resolve the active appearance from settings and publish it for the
+        // dynamic color helpers used throughout the main window.
+        let settings_snapshot = self.manager.lock_ui().settings.clone();
+        let system_dark = options::system_prefers_dark();
+        let palette = options::Appearance::from_settings(&settings_snapshot, system_dark).palette();
+        if let Ok(mut guard) = CURRENT_PALETTE.lock() {
+            *guard = Some(palette);
+        }
+        self.accent = ui_accent(&settings_snapshot.accent);
+
+        // Apply styling to egui context
         apply_app_style(ctx);
 
         // Live transfer-rate sampling and schedule enforcement run before
@@ -1068,11 +1144,11 @@ impl eframe::App for DmApp {
         // -------------------------------------------------------------------
         egui::TopBottomPanel::top("menubar")
             .exact_height(27.0)
-            .frame(egui::Frame::none().fill(BG_DARK).inner_margin(Margin::symmetric(8.0, 3.0)))
+            .frame(egui::Frame::none().fill(bg_dark()).inner_margin(Margin::symmetric(8.0, 3.0)))
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 egui::menu::bar(ui, |ui| {
-                    ui.menu_button(RichText::new("Tasks").color(TEXT_MAIN), |ui| {
+                    ui.menu_button(RichText::new("Tasks").color(text_main()), |ui| {
                         if ui.button("Start Queue Processing").clicked() {
                             self.start_queue_manual();
                         }
@@ -1085,14 +1161,14 @@ impl eframe::App for DmApp {
                         }
                     });
 
-                    ui.menu_button(RichText::new("File").color(TEXT_MAIN), |ui| {
+                    ui.menu_button(RichText::new("File").color(text_main()), |ui| {
                         if ui.button("Open Save Folder").clicked() {
                             let save_dir = self.manager.lock_ui().settings.save_path.clone();
                             let _ = std::process::Command::new("explorer").arg(save_dir).spawn();
                         }
                     });
 
-                    ui.menu_button(RichText::new("Downloads").color(TEXT_MAIN), |ui| {
+                    ui.menu_button(RichText::new("Downloads").color(text_main()), |ui| {
                         if ui.button("Add URL...").clicked() {
                             self.open_add_url();
                         }
@@ -1125,14 +1201,35 @@ impl eframe::App for DmApp {
                         }
                     });
 
-                    ui.menu_button(RichText::new("View").color(TEXT_MAIN), |ui| {
+                    ui.menu_button(RichText::new("View").color(text_main()), |ui| {
                         let cat_label = if self.categories_visible { "Hide Categories" } else { "Show Categories" };
                         if ui.button(cat_label).clicked() {
                             self.categories_visible = !self.categories_visible;
                         }
+                        ui.separator();
+                        ui.menu_button("Columns", |ui| {
+                            for (index, label) in COLUMN_LABELS.iter().enumerate() {
+                                let mut visible = self
+                                    .column_visible
+                                    .get(index)
+                                    .copied()
+                                    .unwrap_or(true);
+                                if ui.checkbox(&mut visible, *label).changed() {
+                                    if !visible
+                                        && self.column_visible.iter().filter(|v| **v).count() <= 1
+                                    {
+                                        visible = true;
+                                    }
+                                    if let Some(slot) = self.column_visible.get_mut(index) {
+                                        *slot = visible;
+                                    }
+                                    self.save_column_settings();
+                                }
+                            }
+                        });
                     });
 
-                    ui.menu_button(RichText::new("Help").color(TEXT_MAIN), |ui| {
+                    ui.menu_button(RichText::new("Help").color(text_main()), |ui| {
                         if ui.button("About DM Ultra").clicked() {
                             self.about_open = true;
                         }
@@ -1147,7 +1244,7 @@ impl eframe::App for DmApp {
             .exact_height(64.0)
             .frame(
                 egui::Frame::none()
-                    .fill(BG_PANEL)
+                    .fill(bg_panel())
                     .inner_margin(Margin::symmetric(6.0, 0.0)),
             )
             .show(ctx, |ui| {
@@ -1168,20 +1265,20 @@ impl eframe::App for DmApp {
                     toolbar_separator(ui);
 
                     // Start
-                    let icon_start = self.icons.get_or_render(ctx, "start", SVG_START, TEXT_DIM, 34);
-                    if render_toolbar_button(ui, &icon_start, "Start", TEXT_DIM, button_w) {
+                    let icon_start = self.icons.get_or_render(ctx, "start", SVG_START, text_dim(), 34);
+                    if render_toolbar_button(ui, &icon_start, "Start", text_dim(), button_w) {
                         self.start_selected();
                     }
 
                     // Pause
-                    let icon_pause = self.icons.get_or_render(ctx, "pause", SVG_PAUSE, TEXT_DIM, 34);
-                    if render_toolbar_button(ui, &icon_pause, "Pause", TEXT_DIM, button_w) {
+                    let icon_pause = self.icons.get_or_render(ctx, "pause", SVG_PAUSE, text_dim(), 34);
+                    if render_toolbar_button(ui, &icon_pause, "Pause", text_dim(), button_w) {
                         self.pause_selected();
                     }
 
                     // Stop All
-                    let icon_stop = self.icons.get_or_render(ctx, "stop", SVG_STOP_ALL, TEXT_DIM, 34);
-                    if render_toolbar_button(ui, &icon_stop, "Stop All", TEXT_DIM, button_w) {
+                    let icon_stop = self.icons.get_or_render(ctx, "stop", SVG_STOP_ALL, text_dim(), 34);
+                    if render_toolbar_button(ui, &icon_stop, "Stop All", text_dim(), button_w) {
                         self.stop_all();
                     }
 
@@ -1192,8 +1289,8 @@ impl eframe::App for DmApp {
                     }
 
                     // Delete
-                    let icon_del = self.icons.get_or_render(ctx, "delete", SVG_DELETE, TEXT_DIM, 34);
-                    if render_toolbar_button(ui, &icon_del, "Delete", TEXT_DIM, button_w) {
+                    let icon_del = self.icons.get_or_render(ctx, "delete", SVG_DELETE, text_dim(), 34);
+                    if render_toolbar_button(ui, &icon_del, "Delete", text_dim(), button_w) {
                         self.delete_selected();
                     }
 
@@ -1206,14 +1303,14 @@ impl eframe::App for DmApp {
                     toolbar_separator(ui);
 
                     // Options
-                    let icon_opt = self.icons.get_or_render(ctx, "options", SVG_OPTIONS, TEXT_DIM, 34);
-                    if render_toolbar_button(ui, &icon_opt, "Options", TEXT_DIM, button_w) {
+                    let icon_opt = self.icons.get_or_render(ctx, "options", SVG_OPTIONS, text_dim(), 34);
+                    if render_toolbar_button(ui, &icon_opt, "Options", text_dim(), button_w) {
                         self.open_settings();
                     }
 
                     // Scheduler
-                    let icon_sched = self.icons.get_or_render(ctx, "scheduler", SVG_SCHEDULER, TEXT_DIM, 34);
-                    if render_toolbar_button(ui, &icon_sched, "Scheduler", TEXT_DIM, button_w) {
+                    let icon_sched = self.icons.get_or_render(ctx, "scheduler", SVG_SCHEDULER, text_dim(), 34);
+                    if render_toolbar_button(ui, &icon_sched, "Scheduler", text_dim(), button_w) {
                         self.open_scheduler();
                     }
                 });
@@ -1222,7 +1319,7 @@ impl eframe::App for DmApp {
                 ui.painter().hline(
                     ui.max_rect().x_range(),
                     ui.max_rect().bottom(),
-                    Stroke::new(1.0, BORDER_HAIRLINE),
+                    Stroke::new(1.0, border_hairline()),
                 );
             });
 
@@ -1233,17 +1330,17 @@ impl eframe::App for DmApp {
             .exact_height(25.0)
             .frame(
                 egui::Frame::none()
-                    .fill(BG_DARK)
+                    .fill(bg_dark())
                     .inner_margin(Margin::symmetric(7.0, 0.0)),
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.label(RichText::new(&self.status_bar).size(11.5).color(TEXT_DIM));
+                    ui.label(RichText::new(&self.status_bar).size(11.5).color(text_dim()));
                 });
                 ui.painter().hline(
                     ui.max_rect().x_range(),
                     ui.max_rect().top(),
-                    Stroke::new(1.0, BORDER_HAIRLINE),
+                    Stroke::new(1.0, border_hairline()),
                 );
             });
 
@@ -1256,7 +1353,7 @@ impl eframe::App for DmApp {
                 .resizable(false)
                 .frame(
                     egui::Frame::none()
-                        .fill(BG_PANEL)
+                        .fill(bg_panel())
                         .inner_margin(Margin::symmetric(6.0, 6.0)),
                 )
                 .show(ctx, |ui| {
@@ -1267,10 +1364,10 @@ impl eframe::App for DmApp {
                     // Header: Categories with [x] close button
                     ui.horizontal(|ui| {
                         ui.add_space(6.0);
-                        ui.label(RichText::new("Categories").size(12.5).strong().color(TEXT_DIM));
+                        ui.label(RichText::new("Categories").size(12.5).strong().color(text_dim()));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let close = egui::Button::new(RichText::new("X").size(11.0).color(TEXT_DIM))
-                                .fill(BG_BADGE)
+                            let close = egui::Button::new(RichText::new("X").size(11.0).color(text_dim()))
+                                .fill(bg_badge())
                                 .rounding(Rounding::same(2.0))
                                 .min_size(Vec2::new(18.0, 18.0));
                             if ui.add(close).on_hover_text("Hide categories").clicked() {
@@ -1297,7 +1394,7 @@ impl eframe::App for DmApp {
                     for (cat, svg, key) in main_cats {
                         let selected = self.selected_nav == cat;
                         let count = self.count_for_category(cat);
-                        let icon_color = if selected { self.accent } else { TEXT_DIM };
+                        let icon_color = if selected { self.accent } else { text_dim() };
                         let icon = self.icons.get_or_render(ctx, key, svg, icon_color, 16);
 
                         if render_sidebar_item(ui, &icon, cat.label(), count, selected, self.accent) {
@@ -1312,7 +1409,7 @@ impl eframe::App for DmApp {
                     // Queue section header
                     ui.horizontal(|ui| {
                         ui.add_space(6.0);
-                        ui.label(RichText::new("Queue").size(12.0).strong().color(TEXT_DIM));
+                        ui.label(RichText::new("Queue").size(12.0).strong().color(text_dim()));
                     });
                     ui.add_space(4.0);
 
@@ -1325,7 +1422,7 @@ impl eframe::App for DmApp {
                     for (cat, svg, key) in queue_cats {
                         let selected = self.selected_nav == cat;
                         let count = self.count_for_category(cat);
-                        let icon_color = if selected { self.accent } else { TEXT_DIM };
+                        let icon_color = if selected { self.accent } else { text_dim() };
                         let icon = self.icons.get_or_render(ctx, key, svg, icon_color, 16);
 
                         if render_sidebar_item(ui, &icon, cat.label(), count, selected, self.accent) {
@@ -1346,7 +1443,7 @@ impl eframe::App for DmApp {
 
                     let count = self.count_for_category(NavCategory::Trash);
                     let selected = self.selected_nav == NavCategory::Trash;
-                    let icon = self.icons.get_or_render(ctx, "trash_cat", SVG_DELETE, if selected { self.accent } else { TEXT_DIM }, 16);
+                    let icon = self.icons.get_or_render(ctx, "trash_cat", SVG_DELETE, if selected { self.accent } else { text_dim() }, 16);
                     if render_sidebar_item(ui, &icon, "Trash", count, selected, self.accent) {
                         self.selected_nav = NavCategory::Trash;
                     }
@@ -1356,7 +1453,7 @@ impl eframe::App for DmApp {
                     ui.painter().vline(
                         ui.max_rect().right() + 6.0,
                         ui.max_rect().y_range(),
-                        Stroke::new(1.0, BORDER_HAIRLINE),
+                        Stroke::new(1.0, border_hairline()),
                     );
                 });
         }
@@ -1365,67 +1462,95 @@ impl eframe::App for DmApp {
         // 5. Central Table (Downloads list or Empty state)
         // -------------------------------------------------------------------
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(BG_DARK))
+            .frame(egui::Frame::none().fill(bg_dark()))
             .show(ctx, |ui| {
                 // Keep one shared column geometry for the header and rows so
                 // the table lines up at every window width.
-                let cols = ColumnWidths::new(ui.available_width() - 16.0);
+                let (visible_columns, column_widths) =
+                    self.column_layout(ui.available_width() - 16.0);
 
                 // Table header (single compact 27 px row)
                 egui::Frame::none()
-                    .fill(BG_HEADER)
+                    .fill(bg_header())
                     .inner_margin(Margin::symmetric(8.0, 0.0))
                     .show(ui, |ui| {
                         ui.set_height(27.0);
                         ui.spacing_mut().item_spacing.x = 0.0;
                         ui.horizontal_centered(|ui| {
-                            // Column 0: File Name
-                            if self.table_header_cell(ui, "File Name", 0, cols.name - 24.0) {
-                                self.toggle_sort(0);
-                            }
-                            ui.add_space(4.0);
+                            for (position, &column) in visible_columns.iter().enumerate() {
+                                let width = column_widths[position];
+                                if column == 1 {
+                                    let search_icon = self.icons.get_or_render(ctx, "search", SVG_SEARCH, text_dim(), 14);
+                                    let (icon_rect, icon_resp) = ui.allocate_exact_size(
+                                        Vec2::splat(16.0),
+                                        Sense::click(),
+                                    );
+                                    ui.painter().image(
+                                        search_icon.id(),
+                                        icon_rect,
+                                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                                        Color32::WHITE,
+                                    );
+                                    self.search_icon_rect = icon_rect;
+                                    if icon_resp
+                                        .on_hover_text("Search downloads")
+                                        .on_hover_cursor(CursorIcon::Default)
+                                        .clicked()
+                                    {
+                                        self.search_open = !self.search_open;
+                                        self.search_focus = self.search_open;
+                                    }
+                                    if width > 16.0 {
+                                        ui.add_space(width - 16.0);
+                                    }
+                                } else {
+                                    let label = COLUMN_LABELS[column];
+                                    if self.table_header_cell(ui, label, column, width) {
+                                        self.toggle_sort(column);
+                                    }
+                                }
 
-                            // Column 1: Search icon (the queue column below)
-                            let search_icon = self.icons.get_or_render(ctx, "search", SVG_SEARCH, TEXT_DIM, 14);
-                            let (icon_rect, icon_resp) = ui.allocate_exact_size(
-                                Vec2::splat(16.0),
-                                Sense::click(),
-                            );
-                            ui.painter().image(
-                                search_icon.id(),
-                                icon_rect,
-                                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                                Color32::WHITE,
-                            );
-                            self.search_icon_rect = icon_rect;
-                            if icon_resp
-                                .on_hover_text("Search downloads")
-                                .on_hover_cursor(CursorIcon::Default)
-                                .clicked()
-                            {
-                                self.search_open = !self.search_open;
-                                self.search_focus = self.search_open;
+                                // Draggable resize handle between columns.
+                                if position + 1 < visible_columns.len() {
+                                    let (handle_rect, handle_resp) = ui.allocate_exact_size(
+                                        Vec2::new(6.0, 20.0),
+                                        Sense::click_and_drag(),
+                                    );
+                                    let color = if handle_resp.hovered() || handle_resp.dragged() {
+                                        text_main()
+                                    } else {
+                                        border_hairline()
+                                    };
+                                    ui.painter().vline(
+                                        handle_rect.center().x,
+                                        handle_rect.y_range(),
+                                        Stroke::new(1.0, color),
+                                    );
+                                    if handle_resp.dragged() {
+                                        let delta = handle_resp.drag_delta().x;
+                                        let left = visible_columns[position];
+                                        let right = visible_columns[position + 1];
+                                        let old_left = self.column_widths[left];
+                                        let old_right = self.column_widths[right];
+                                        let max_increase = old_right - 40.0;
+                                        let max_decrease = old_left - 40.0;
+                                        let limited = delta.clamp(-max_decrease, max_increase);
+                                        self.column_widths[left] = old_left + limited;
+                                        self.column_widths[right] = old_right - limited;
+                                        self.columns_dragging = true;
+                                    }
+                                    if handle_resp.drag_stopped() {
+                                        self.columns_dragging = false;
+                                        self.save_column_settings();
+                                    }
+                                }
                             }
-                            ui.add_space(4.0);
-
-                            // Column 2: Size
-                            if self.table_header_cell(ui, "Size", 2, cols.size) { self.toggle_sort(2); }
-                            // Column 3: Status
-                            if self.table_header_cell(ui, "Status", 3, cols.status) { self.toggle_sort(3); }
-                            // Column 4: Time left
-                            if self.table_header_cell(ui, "Time left", 4, cols.time_left) { self.toggle_sort(4); }
-                            // Column 5: Transfer rate
-                            if self.table_header_cell(ui, "Transfer rate", 5, cols.transfer) { self.toggle_sort(5); }
-                            // Column 6: Last Try
-                            if self.table_header_cell(ui, "Last Try", 6, cols.last_try) { self.toggle_sort(6); }
-                            // Column 7: Description
-                            if self.table_header_cell(ui, "Description", 7, cols.description) { self.toggle_sort(7); }
                         });
 
                         ui.painter().hline(
                             ui.max_rect().x_range(),
                             ui.max_rect().bottom(),
-                            Stroke::new(1.0, BORDER_HAIRLINE),
+                            Stroke::new(1.0, border_hairline()),
                         );
                     });
 
@@ -1491,25 +1616,25 @@ impl eframe::App for DmApp {
                     let top_gap = ((ui.available_height() - block_height) * 0.5).max(0.0);
                     ui.add_space(top_gap);
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("No downloads").size(18.0).color(TEXT_EMPTY_TITLE));
+                        ui.label(RichText::new("No downloads").size(18.0).color(text_empty_title()));
                         ui.add_space(5.0);
                         let subtitle = if query.is_empty() {
                             "Click Add URL on the toolbar to start downloading."
                         } else {
                             "No downloads match your search."
                         };
-                        ui.label(RichText::new(subtitle).size(13.0).color(TEXT_EMPTY_SUB));
+                        ui.label(RichText::new(subtitle).size(13.0).color(text_empty_sub()));
                     });
                 } else {
                     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                         for (row_idx, d) in items.iter().enumerate() {
                             let is_selected = self.selected_download_id == Some(d.id);
                             let bg_color = if is_selected {
-                                BG_ROW_SELECTED
+                                bg_row_selected()
                             } else if row_idx % 2 == 0 {
-                                BG_ROW_EVEN
+                                bg_row_even()
                             } else {
-                                BG_ROW_ODD
+                                bg_row_odd()
                             };
 
                             let live_stats = self.manager.stats(d.id);
@@ -1527,56 +1652,161 @@ impl eframe::App for DmApp {
                                 .inner_margin(Margin::symmetric(8.0, 5.0))
                                 .show(ui, |ui| {
                                     ui.spacing_mut().item_spacing.x = 0.0;
+                                    let (visible_columns, column_widths) =
+                                        self.column_layout(ui.available_width() - 16.0);
                                     ui.horizontal(|ui| {
-                                        // 0. File Name
-                                        let name = d.save_path.file_name().unwrap_or_default().to_string_lossy();
-                                        ui.add_sized(Vec2::new(cols.name, 18.0), egui::Label::new(RichText::new(name.as_ref()).size(12.5).color(TEXT_MAIN)).truncate(true));
+                                        for (position, &column) in visible_columns.iter().enumerate() {
+                                            let width = column_widths[position];
+                                            match column {
+                                                0 => {
+                                                    let name = d
+                                                        .save_path
+                                                        .file_name()
+                                                        .unwrap_or_default()
+                                                        .to_string_lossy();
+                                                    ui.add_sized(
+                                                        Vec2::new(width, 18.0),
+                                                        egui::Label::new(
+                                                            RichText::new(name.as_ref())
+                                                                .size(12.5)
+                                                                .color(text_main()),
+                                                        )
+                                                        .truncate(true),
+                                                    );
+                                                }
+                                                1 => {
+                                                    let q_str = d.queue.as_deref().unwrap_or("");
+                                                    ui.add_sized(
+                                                        Vec2::new(width, 18.0),
+                                                        egui::Label::new(
+                                                            RichText::new(q_str).size(11.0).color(text_dim()),
+                                                        )
+                                                        .truncate(true),
+                                                    );
+                                                }
+                                                2 => {
+                                                    let size_str = if total_bytes > 0 {
+                                                        human_bytes(total_bytes)
+                                                    } else {
+                                                        "Unknown".into()
+                                                    };
+                                                    ui.add_sized(
+                                                        Vec2::new(width, 18.0),
+                                                        egui::Label::new(
+                                                            RichText::new(size_str).size(12.0).color(text_dim()),
+                                                        ),
+                                                    );
+                                                }
+                                                3 => {
+                                                    let status_color = match d.status {
+                                                        Status::Downloading => status_downloading(),
+                                                        Status::Complete => status_complete(),
+                                                        Status::Paused => status_paused(),
+                                                        Status::Failed => status_failed(),
+                                                        Status::Queued => text_dim(),
+                                                    };
+                                                    ui.add_sized(
+                                                        Vec2::new(width, 18.0),
+                                                        egui::Label::new(
+                                                            RichText::new(d.status.as_str())
+                                                                .size(12.0)
+                                                                .color(status_color),
+                                                        ),
+                                                    );
+                                                }
+                                                4 => {
+                                                    let time_left =
+                                                        if d.status == Status::Downloading && speed_bps > 0 {
+                                                            let rem = total_bytes.saturating_sub(downloaded_bytes);
+                                                            format_eta(rem, speed_bps)
+                                                        } else {
+                                                            "--".into()
+                                                        };
+                                                    ui.add_sized(
+                                                        Vec2::new(width, 18.0),
+                                                        egui::Label::new(
+                                                            RichText::new(time_left).size(12.0).color(text_dim()),
+                                                        ),
+                                                    );
+                                                }
+                                                5 => {
+                                                    let rate_str =
+                                                        if d.status == Status::Downloading && speed_bps > 0 {
+                                                            format!("{}/s", human_bytes(speed_bps))
+                                                        } else {
+                                                            "--".into()
+                                                        };
+                                                    ui.add_sized(
+                                                        Vec2::new(width, 18.0),
+                                                        egui::Label::new(
+                                                            RichText::new(rate_str).size(12.0).color(text_dim()),
+                                                        ),
+                                                    );
+                                                }
+                                                6 => {
+                                                    let date_str = if d.last_try_date > 0 {
+                                                        format_timestamp(d.last_try_date)
+                                                    } else {
+                                                        "".into()
+                                                    };
+                                                    ui.add_sized(
+                                                        Vec2::new(width, 18.0),
+                                                        egui::Label::new(
+                                                            RichText::new(date_str).size(12.0).color(text_dim()),
+                                                        ),
+                                                    );
+                                                }
+                                                7 => {
+                                                    ui.add_sized(
+                                                        Vec2::new(width, 18.0),
+                                                        egui::Label::new(
+                                                            RichText::new(&d.description)
+                                                                .size(12.0)
+                                                                .color(text_dim()),
+                                                        )
+                                                        .truncate(true),
+                                                    );
+                                                }
+                                                _ => {}
+                                            }
 
-                                        // 1. Queue marker (search column in header)
-                                        let q_str = d.queue.as_deref().unwrap_or("");
-                                        ui.add_sized(Vec2::new(cols.queue, 18.0), egui::Label::new(RichText::new(q_str).size(11.0).color(TEXT_DIM)).truncate(true));
-
-                                        // 2. Size
-                                        let size_str = if total_bytes > 0 { human_bytes(total_bytes) } else { "Unknown".into() };
-                                        ui.add_sized(Vec2::new(cols.size, 18.0), egui::Label::new(RichText::new(size_str).size(12.0).color(TEXT_DIM)));
-
-                                        // 3. Status
-                                        let status_color = match d.status {
-                                            Status::Downloading => STATUS_DOWNLOADING,
-                                            Status::Complete => STATUS_COMPLETE,
-                                            Status::Paused => STATUS_PAUSED,
-                                            Status::Failed => STATUS_FAILED,
-                                            Status::Queued => TEXT_DIM,
-                                        };
-                                        ui.add_sized(Vec2::new(cols.status, 18.0), egui::Label::new(RichText::new(d.status.as_str()).size(12.0).color(status_color)));
-
-                                        // 4. Time left
-                                        let time_left = if d.status == Status::Downloading && speed_bps > 0 {
-                                            let rem = total_bytes.saturating_sub(downloaded_bytes);
-                                            format_eta(rem, speed_bps)
-                                        } else {
-                                            "--".into()
-                                        };
-                                        ui.add_sized(Vec2::new(cols.time_left, 18.0), egui::Label::new(RichText::new(time_left).size(12.0).color(TEXT_DIM)));
-
-                                        // 5. Transfer rate
-                                        let rate_str = if d.status == Status::Downloading && speed_bps > 0 {
-                                            format!("{}/s", human_bytes(speed_bps))
-                                        } else {
-                                            "--".into()
-                                        };
-                                        ui.add_sized(Vec2::new(cols.transfer, 18.0), egui::Label::new(RichText::new(rate_str).size(12.0).color(TEXT_DIM)));
-
-                                        // 6. Last Try
-                                        let date_str = if d.last_try_date > 0 {
-                                            format_timestamp(d.last_try_date)
-                                        } else {
-                                            "".into()
-                                        };
-                                        ui.add_sized(Vec2::new(cols.last_try, 18.0), egui::Label::new(RichText::new(date_str).size(12.0).color(TEXT_DIM)));
-
-                                        // 7. Description
-                                        ui.add_sized(Vec2::new(cols.description, 18.0), egui::Label::new(RichText::new(&d.description).size(12.0).color(TEXT_DIM)).truncate(true));
+                                            if position + 1 < visible_columns.len() {
+                                                let (handle_rect, handle_resp) = ui
+                                                    .allocate_exact_size(
+                                                        Vec2::new(6.0, 18.0),
+                                                        Sense::click_and_drag(),
+                                                    );
+                                                let color = if handle_resp.hovered()
+                                                    || handle_resp.dragged()
+                                                {
+                                                    text_main()
+                                                } else {
+                                                    border_hairline()
+                                                };
+                                                ui.painter().vline(
+                                                    handle_rect.center().x,
+                                                    handle_rect.y_range(),
+                                                    Stroke::new(1.0, color),
+                                                );
+                                                if handle_resp.dragged() {
+                                                    let delta = handle_resp.drag_delta().x;
+                                                    let left = visible_columns[position];
+                                                    let right = visible_columns[position + 1];
+                                                    let old_left = self.column_widths[left];
+                                                    let old_right = self.column_widths[right];
+                                                    let max_increase = old_right - 40.0;
+                                                    let max_decrease = old_left - 40.0;
+                                                    let limited = delta.clamp(-max_decrease, max_increase);
+                                                    self.column_widths[left] = old_left + limited;
+                                                    self.column_widths[right] = old_right - limited;
+                                                    self.columns_dragging = true;
+                                                }
+                                                if handle_resp.drag_stopped() {
+                                                    self.columns_dragging = false;
+                                                    self.save_column_settings();
+                                                }
+                                            }
+                                        }
                                     });
                                 })
                                 .response
@@ -1681,6 +1911,8 @@ impl eframe::App for DmApp {
             let outcome = self.settings_dialog.take_outcome();
             if let Some(new_settings) = outcome.settings {
                 self.accent = ui_accent(&new_settings.accent);
+                self.column_widths = column_widths_from_settings(&new_settings);
+                self.column_visible = column_visible_from_settings(&new_settings);
                 let mut st = self.manager.lock_ui();
                 st.settings = new_settings;
                 let _ = st.save();
@@ -1757,20 +1989,20 @@ impl DmApp {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
                 }
-                egui::CentralPanel::default().frame(egui::Frame::none().fill(BG_PANEL).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
-                    ui.label(RichText::new("Enter new address to download").size(14.0).strong().color(TEXT_MAIN));
+                egui::CentralPanel::default().frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
+                    ui.label(RichText::new("Enter new address to download").size(14.0).strong().color(text_main()));
                     ui.add_space(8.0);
 
                     // URL row
                     ui.horizontal(|ui| {
-                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Address:").color(TEXT_DIM)));
+                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Address:").color(text_dim())));
                         ui.add_sized(Vec2::new(370.0, 24.0), egui::TextEdit::singleline(&mut self.add_dialog.url).hint_text("https://example.com/file.zip"));
                     });
                     ui.add_space(6.0);
 
                     // Save As row
                     ui.horizontal(|ui| {
-                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Save To:").color(TEXT_DIM)));
+                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Save To:").color(text_dim())));
                         ui.add_sized(Vec2::new(330.0, 24.0), egui::TextEdit::singleline(&mut self.add_dialog.save_as));
                         if ui.button("...").clicked() {
                             if let Some(folder) = rfd::FileDialog::new().pick_folder() {
@@ -1786,7 +2018,7 @@ impl DmApp {
                         st.queues.clone()
                     };
                     ui.horizontal(|ui| {
-                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Queue:").color(TEXT_DIM)));
+                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Queue:").color(text_dim())));
                         let mut queue = self.add_dialog.queue.clone();
                         egui::ComboBox::from_id_source("add_url_queue")
                             .width(260.0)
@@ -1807,37 +2039,37 @@ impl DmApp {
 
                     // Description row
                     ui.horizontal(|ui| {
-                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Description:").color(TEXT_DIM)));
+                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Description:").color(text_dim())));
                         ui.add_sized(Vec2::new(370.0, 24.0), egui::TextEdit::singleline(&mut self.add_dialog.description).hint_text("Optional note"));
                     });
                     ui.add_space(6.0);
 
                     // Connections row
                     ui.horizontal(|ui| {
-                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Connections:").color(TEXT_DIM)));
+                        ui.add_sized([78.0, 20.0], egui::Label::new(RichText::new("Connections:").color(text_dim())));
                         ui.add(egui::DragValue::new(&mut self.add_dialog.connections).clamp_range(1..=32));
-                        ui.label(RichText::new("simultaneous connections").size(11.0).color(TEXT_DIM));
+                        ui.label(RichText::new("simultaneous connections").size(11.0).color(text_dim()));
                     });
 
                     if !self.add_dialog.error.is_empty() {
                         ui.add_space(6.0);
-                        ui.label(RichText::new(&self.add_dialog.error).size(11.5).color(STATUS_FAILED));
+                        ui.label(RichText::new(&self.add_dialog.error).size(11.5).color(status_failed()));
                     }
                     ui.add_space(12.0);
 
                     // Action buttons
                     ui.horizontal(|ui| {
-                        if ui.button(RichText::new("  OK (Download Now)  ").color(TEXT_MAIN)).clicked() {
+                        if ui.button(RichText::new("  OK (Download Now)  ").color(text_main())).clicked() {
                             if self.create_download(true) {
                                 self.add_dialog.open = false;
                             }
                         }
-                        if ui.button(RichText::new(" Download Later ").color(TEXT_DIM)).clicked() {
+                        if ui.button(RichText::new(" Download Later ").color(text_dim())).clicked() {
                             if self.create_download(false) {
                                 self.add_dialog.open = false;
                             }
                         }
-                        if ui.button(RichText::new(" Cancel ").color(TEXT_DIM)).clicked() {
+                        if ui.button(RichText::new(" Cancel ").color(text_dim())).clicked() {
                             self.add_dialog.open = false;
                         }
                     });
@@ -1990,12 +2222,12 @@ impl DmApp {
                     st.queues.clone()
                 };
                 let mut chosen_queue = self.scheduler_dialog.queue.clone();
-                egui::CentralPanel::default().frame(egui::Frame::none().fill(BG_PANEL).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
-                    ui.label(RichText::new("Schedule Queued Downloads").size(14.0).strong().color(TEXT_MAIN));
+                egui::CentralPanel::default().frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
+                    ui.label(RichText::new("Schedule Queued Downloads").size(14.0).strong().color(text_main()));
                     ui.add_space(8.0);
 
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Queue:").color(TEXT_DIM));
+                        ui.label(RichText::new("Queue:").color(text_dim()));
                         egui::ComboBox::from_id_source("scheduler_queue")
                             .width(250.0)
                             .selected_text(if chosen_queue.is_empty() { MAIN_QUEUE } else { chosen_queue.as_str() })
@@ -2015,18 +2247,18 @@ impl DmApp {
                     ui.add_space(6.0);
 
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Start time:").color(TEXT_DIM));
+                        ui.label(RichText::new("Start time:").color(text_dim()));
                         ui.add_sized(Vec2::new(120.0, 24.0), egui::TextEdit::singleline(&mut self.scheduler_dialog.start_time).hint_text("HH:MM, blank = disabled"));
                     });
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Stop time:").color(TEXT_DIM));
+                        ui.label(RichText::new("Stop time:").color(text_dim()));
                         ui.add_sized(Vec2::new(120.0, 24.0), egui::TextEdit::singleline(&mut self.scheduler_dialog.stop_time).hint_text("HH:MM, blank = disabled"));
                     });
                     ui.add_space(4.0);
-                    ui.label(RichText::new("Times are local. Overnight windows (start after stop) are supported.").size(10.5).color(TEXT_DIM));
+                    ui.label(RichText::new("Times are local. Overnight windows (start after stop) are supported.").size(10.5).color(text_dim()));
                     ui.add_space(8.0);
 
-                    ui.label(RichText::new("Days:").color(TEXT_DIM));
+                    ui.label(RichText::new("Days:").color(text_dim()));
                     ui.horizontal_wrapped(|ui| {
                         let labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
                         for (index, label) in labels.iter().enumerate() {
@@ -2042,13 +2274,13 @@ impl DmApp {
                             }
                         }
                     });
-                    ui.label(RichText::new("Leave all days unselected to run every day.").size(10.5).color(TEXT_DIM));
+                    ui.label(RichText::new("Leave all days unselected to run every day.").size(10.5).color(text_dim()));
                     ui.add_space(8.0);
                     ui.checkbox(&mut self.scheduler_dialog.once, "Run once only");
                     ui.add_space(6.0);
 
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("When finished:").color(TEXT_DIM));
+                        ui.label(RichText::new("When finished:").color(text_dim()));
                         egui::ComboBox::from_id_source("scheduler_on_finish")
                             .selected_text(match self.scheduler_dialog.on_finish.as_str() {
                                 "exit" => "Exit DM Ultra",
@@ -2062,7 +2294,7 @@ impl DmApp {
 
                     if !self.scheduler_dialog.error.is_empty() {
                         ui.add_space(6.0);
-                        ui.label(RichText::new(&self.scheduler_dialog.error).size(11.5).color(STATUS_FAILED));
+                        ui.label(RichText::new(&self.scheduler_dialog.error).size(11.5).color(status_failed()));
                     }
 
                     ui.add_space(12.0);
@@ -2116,11 +2348,11 @@ impl DmApp {
                     if ctx.input(|i| i.viewport().close_requested()) {
                         close_requested = true;
                     }
-                    egui::CentralPanel::default().frame(egui::Frame::none().fill(BG_PANEL).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
-                        ui.label(RichText::new(&filename).size(15.0).strong().color(TEXT_MAIN));
-                        ui.add(egui::Label::new(RichText::new(&d.url).size(11.0).color(TEXT_DIM)).truncate(true));
+                    egui::CentralPanel::default().frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
+                        ui.label(RichText::new(&filename).size(15.0).strong().color(text_main()));
+                        ui.add(egui::Label::new(RichText::new(&d.url).size(11.0).color(text_dim())).truncate(true));
                         ui.add_space(4.0);
-                        ui.label(RichText::new(format!("Save to: {}", d.save_path.display())).size(11.0).color(TEXT_DIM));
+                        ui.label(RichText::new(format!("Save to: {}", d.save_path.display())).size(11.0).color(text_dim()));
                         ui.add_space(8.0);
 
                         let total = if d.file_size > 0 { d.file_size } else { stats.as_ref().map(|s| s.total()).unwrap_or(0) };
@@ -2137,16 +2369,16 @@ impl DmApp {
                             .num_columns(2)
                             .spacing([12.0, 4.0])
                             .show(ui, |ui| {
-                                ui.label(RichText::new("Downloaded:").color(TEXT_DIM));
-                                ui.label(RichText::new(format!("{} / {}", human_bytes(downloaded), if total > 0 { human_bytes(total) } else { "Unknown".to_string() })).color(TEXT_MAIN));
+                                ui.label(RichText::new("Downloaded:").color(text_dim()));
+                                ui.label(RichText::new(format!("{} / {}", human_bytes(downloaded), if total > 0 { human_bytes(total) } else { "Unknown".to_string() })).color(text_main()));
                                 ui.end_row();
 
-                                ui.label(RichText::new("Transfer rate:").color(TEXT_DIM));
+                                ui.label(RichText::new("Transfer rate:").color(text_dim()));
                                 ui.label(RichText::new(if d.status == Status::Downloading && speed_bps > 0 {
                                     format!("{}/s", human_bytes(speed_bps))
                                 } else {
                                     "--".to_string()
-                                }).color(TEXT_MAIN));
+                                }).color(text_main()));
                                 ui.end_row();
 
                                 let eta = if d.status == Status::Downloading && speed_bps > 0 && total > downloaded {
@@ -2154,24 +2386,24 @@ impl DmApp {
                                 } else {
                                     "--".to_string()
                                 };
-                                ui.label(RichText::new("Time left:").color(TEXT_DIM));
-                                ui.label(RichText::new(eta).color(TEXT_MAIN));
+                                ui.label(RichText::new("Time left:").color(text_dim()));
+                                ui.label(RichText::new(eta).color(text_main()));
                                 ui.end_row();
 
-                                ui.label(RichText::new("Status:").color(TEXT_DIM));
-                                ui.label(RichText::new(d.status.as_str()).color(TEXT_MAIN));
+                                ui.label(RichText::new("Status:").color(text_dim()));
+                                ui.label(RichText::new(d.status.as_str()).color(text_main()));
                                 ui.end_row();
 
-                                ui.label(RichText::new("Connections:").color(TEXT_DIM));
+                                ui.label(RichText::new("Connections:").color(text_dim()));
                                 let connections = stats
                                     .as_ref()
                                     .map(|s| s.segments().len())
                                     .unwrap_or(d.max_connections.unwrap_or(1) as usize);
-                                ui.label(RichText::new(connections.to_string()).color(TEXT_MAIN));
+                                ui.label(RichText::new(connections.to_string()).color(text_main()));
                                 ui.end_row();
 
-                                ui.label(RichText::new("Resumable:").color(TEXT_DIM));
-                                ui.label(RichText::new(if d.resumable { "Yes" } else { "No" }).color(TEXT_MAIN));
+                                ui.label(RichText::new("Resumable:").color(text_dim()));
+                                ui.label(RichText::new(if d.resumable { "Yes" } else { "No" }).color(text_main()));
                                 ui.end_row();
                             });
 
@@ -2218,7 +2450,7 @@ impl DmApp {
             ""
         };
         let text = format!("{}{}", label, arrow);
-        let color = if is_sorted { TEXT_MAIN } else { TEXT_DIM };
+        let color = if is_sorted { text_main() } else { text_dim() };
 
         // Left-align each heading at the start of its column, like the
         // reference table (egui buttons would center the text instead).
@@ -2257,7 +2489,7 @@ fn render_toolbar_button(
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 62.0), Sense::click());
 
     if response.hovered() {
-        ui.painter().rect_filled(rect.shrink(2.0), Rounding::same(4.0), BG_ROW_HOVER);
+        ui.painter().rect_filled(rect.shrink(2.0), Rounding::same(4.0), bg_row_hover());
     }
 
     // Icon sits above its label, with the whole cell clickable.
@@ -2291,7 +2523,7 @@ fn toolbar_separator(ui: &mut Ui) {
     ui.painter().vline(
         rect.center().x,
         rect.y_range().shrink(9.0),
-        Stroke::new(1.0, BORDER_HAIRLINE),
+        Stroke::new(1.0, border_hairline()),
     );
 }
 
@@ -2303,10 +2535,10 @@ fn render_sidebar_item(
     selected: bool,
     accent: Color32,
 ) -> bool {
-    let bg_color = if selected { BG_PILL_SELECTED } else { Color32::TRANSPARENT };
-    let text_color = if selected { TEXT_MAIN } else { TEXT_DIM };
-    let badge_bg = if selected { BG_BADGE_SEL } else { BG_BADGE };
-    let badge_text = if selected { accent } else { TEXT_BADGE };
+    let bg_color = if selected { bg_pill_selected() } else { Color32::TRANSPARENT };
+    let text_color = if selected { text_main() } else { text_dim() };
+    let badge_bg = if selected { bg_badge_sel() } else { bg_badge() };
+    let badge_text = if selected { accent } else { text_badge() };
 
     let resp = egui::Frame::none()
         .fill(bg_color)
@@ -2397,7 +2629,7 @@ fn render_segmented_progress(
             // Thin separators between connection ranges.
             for segment in segments {
                 let x = rect.left() + (segment.start as f32 / total as f32) * rect.width();
-                painter.vline(x, rect.y_range(), Stroke::new(1.0, BG_DARK));
+                painter.vline(x, rect.y_range(), Stroke::new(1.0, bg_dark()));
             }
         }
     } else if downloaded > 0 {
@@ -2417,26 +2649,27 @@ fn render_segmented_progress(
         FontId::proportional(12.0),
         Color32::WHITE,
     );
-    painter.rect_stroke(rect, Rounding::same(4.0), Stroke::new(1.0, BORDER_HAIRLINE));
+    painter.rect_stroke(rect, Rounding::same(4.0), Stroke::new(1.0, border_hairline()));
 
     response
 }
 
 fn apply_app_style(ctx: &egui::Context) {
+    let palette = current_palette();
     let mut style = (*ctx.style()).clone();
-    style.visuals.dark_mode = true;
-    style.visuals.override_text_color = Some(TEXT_MAIN);
-    style.visuals.panel_fill = BG_DARK;
-    style.visuals.window_fill = BG_DARK;
-    style.visuals.faint_bg_color = BG_PANEL;
+    style.visuals.dark_mode = palette.dark;
+    style.visuals.override_text_color = Some(text_main());
+    style.visuals.panel_fill = bg_dark();
+    style.visuals.window_fill = bg_dark();
+    style.visuals.faint_bg_color = bg_panel();
     style.visuals.extreme_bg_color = Color32::from_rgb(22, 26, 33);
-    style.visuals.widgets.inactive.bg_fill = BG_PANEL;
-    style.visuals.widgets.hovered.bg_fill = BG_ROW_HOVER;
-    style.visuals.widgets.active.bg_fill = BG_ROW_SELECTED;
-    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_DIM);
-    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
-    style.visuals.selection.bg_fill = BG_ROW_SELECTED;
-    style.visuals.window_stroke = Stroke::new(1.0, BORDER_HAIRLINE);
+    style.visuals.widgets.inactive.bg_fill = bg_panel();
+    style.visuals.widgets.hovered.bg_fill = bg_row_hover();
+    style.visuals.widgets.active.bg_fill = bg_row_selected();
+    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, text_dim());
+    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, text_main());
+    style.visuals.selection.bg_fill = bg_row_selected();
+    style.visuals.window_stroke = Stroke::new(1.0, border_hairline());
     style.spacing.item_spacing = Vec2::new(6.0, 4.0);
     style.interaction.selectable_labels = false;
     ctx.set_style(style);
@@ -2451,6 +2684,28 @@ fn is_file_type(path: &std::path::Path, exts: &[&str]) -> bool {
         exts.iter().any(|&e| e == ext_lower)
     } else {
         false
+    }
+}
+
+fn column_widths_from_settings(settings: &crate::state::Settings) -> Vec<f32> {
+    if settings.list_col_widths.len() == 8 {
+        let mut widths = settings.list_col_widths.clone();
+        for (index, width) in widths.iter_mut().enumerate() {
+            if !width.is_finite() || *width < 40.0 {
+                *width = DEFAULT_COLUMN_WIDTHS[index];
+            }
+        }
+        widths
+    } else {
+        DEFAULT_COLUMN_WIDTHS.to_vec()
+    }
+}
+
+fn column_visible_from_settings(settings: &crate::state::Settings) -> Vec<bool> {
+    if settings.list_col_visible.len() == 8 {
+        settings.list_col_visible.clone()
+    } else {
+        vec![true; 8]
     }
 }
 
@@ -2667,3 +2922,4 @@ pub fn launch(manager: Arc<Manager>) -> Result<()> {
     eframe::run_native("DM Ultra", options, Box::new(move |_cc| Box::new(app)))
         .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
 }
+

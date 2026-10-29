@@ -208,6 +208,17 @@ fn base_for(theme: &str) -> Base {
             accent_alpha: 38,
             dark: true,
         },
+        "dmUltra" => Base {
+            background: 0x0F172A,
+            surface: 0x141D30,
+            surface2: 0x1E283B,
+            text: 0xD6D9E0,
+            muted: 0x9299A5,
+            border: 0x2A364A,
+            error: 0xEF4444,
+            accent_alpha: 38,
+            dark: true,
+        },
         "defaultDark" => Base {
             background: 0x1C1C1E,
             surface: 0x2C2C2E,
@@ -948,6 +959,15 @@ impl SettingsDialog {
         style.visuals.window_fill = pal.background;
         style.visuals.faint_bg_color = pal.surface;
         style.visuals.extreme_bg_color = pal.surface;
+        style.visuals.widgets.inactive.bg_fill = pal.surface;
+        style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, pal.text);
+        style.visuals.widgets.hovered.bg_fill = pal.surface2;
+        style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, pal.text);
+        style.visuals.widgets.active.bg_fill = pal.accent;
+        style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
+        style.visuals.selection.bg_fill = pal.accent;
+        style.visuals.selection.stroke = egui::Stroke::new(1.0, Color32::WHITE);
+        style.interaction.selectable_labels = false;
         ctx.set_style(style);
 
         ui.style_mut().spacing.button_padding = egui::vec2(10.0, 5.0);
@@ -2122,6 +2142,7 @@ impl SettingsDialog {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             for (id, label) in [
+                                ("dmUltra", "DM Ultra Dark"),
                                 ("defaultDark", "Default Dark"),
                                 ("midnightBlue", "Midnight Blue"),
                                 ("nord", "Nord"),
