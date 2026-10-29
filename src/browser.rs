@@ -153,7 +153,7 @@ fn manifest_json() -> String {
   "manifest_version": 3,
   "key": "{EXT_KEY}",
   "name": "DM Ultra Integration",
-  "version": "1.0.0",
+  "version": "{}",
   "description": "Opens download links in DM Ultra",
   "permissions": ["nativeMessaging", "contextMenus", "tabs", "webRequest"],
   "host_permissions": ["<all_urls>"],
@@ -165,7 +165,8 @@ fn manifest_json() -> String {
     "gecko": {{"id": "dmultra@dmultra.local", "strict_min_version": "115.0"}}
   }}
 }}
-"#
+"#,
+        env!("CARGO_PKG_VERSION")
     )
 }
 
@@ -381,7 +382,7 @@ fn manifest_firefox_json() -> String {
         r#"{{
   "manifest_version": 2,
   "name": "DM Ultra Integration",
-  "version": "1.0.0",
+  "version": "{}",
   "description": "Opens download links in DM Ultra",
   "permissions": ["nativeMessaging", "contextMenus", "<all_urls>"],
   "background": {{"scripts": ["background.js"]}},
@@ -392,7 +393,8 @@ fn manifest_firefox_json() -> String {
     "gecko": {{"id": "dmultra@dmultra.local", "strict_min_version": "115.0"}}
   }}
 }}
-"#
+"#,
+        env!("CARGO_PKG_VERSION")
     )
 }
 
@@ -594,10 +596,30 @@ pub fn take_pending() -> Option<(Vec<String>, String)> {
 fn gui_running() -> bool {
     #[link(name = "user32")]
     unsafe extern "system" {
-        fn FindWindowW(class: *const u16, title: *const u16) -> isize;
+        fn EnumWindows(callback: extern "system" fn(isize, isize) -> i32, context: isize) -> i32;
+        fn GetWindowTextW(hwnd: isize, text: *mut u16, max_count: i32) -> i32;
     }
-    let title: Vec<u16> = "DM Ultra".encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) != 0 }
+
+    extern "system" fn find_main_window(hwnd: isize, context: isize) -> i32 {
+        let mut title = [0u16; 256];
+        let length = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) };
+        if length > 0 {
+            let title = String::from_utf16_lossy(&title[..length as usize]);
+            if title == "DM Ultra" || title.starts_with("DM Ultra v") {
+                unsafe {
+                    *(context as *mut bool) = true;
+                }
+                return 0;
+            }
+        }
+        1
+    }
+
+    let mut found = false;
+    unsafe {
+        EnumWindows(find_main_window, &mut found as *mut bool as isize);
+    }
+    found
 }
 
 #[cfg(not(windows))]
@@ -744,7 +766,19 @@ pub fn host_loop() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_pending_queue_name;
+    use super::{is_pending_queue_name, manifest_firefox_json, manifest_json};
+
+    #[test]
+    fn generated_extension_manifests_use_the_application_version() {
+        let version = env!("CARGO_PKG_VERSION");
+        let chromium: serde_json::Value =
+            serde_json::from_str(&manifest_json()).expect("valid Chromium manifest");
+        let firefox: serde_json::Value =
+            serde_json::from_str(&manifest_firefox_json()).expect("valid Firefox manifest");
+
+        assert_eq!(chromium["version"], version);
+        assert_eq!(firefox["version"], version);
+    }
 
     #[test]
     fn numeric_queue_names_are_accepted() {

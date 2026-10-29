@@ -64,6 +64,10 @@ mod native_win {
     pub const OUR_TITLES_EXACT: [&str; 4] = ["DM Ultra", "Add new download...", "Scheduler", "Options"];
     pub const OUR_TITLES_PREFIX: &str = "Download status - ";
 
+    fn is_main_title(text: &str) -> bool {
+        text == "DM Ultra" || text.starts_with("DM Ultra v")
+    }
+
     /// Dark title bar message ids (DWMWA_USE_IMMERSIVE_DARK_MODE).
     const DWMWA_USE_IMMERSIVE_DARK_MODE: c_int = 20;
 
@@ -119,7 +123,9 @@ mod native_win {
     }
 
     fn is_ours(text: &str) -> bool {
-        OUR_TITLES_EXACT.contains(&text) || text.starts_with(OUR_TITLES_PREFIX)
+        OUR_TITLES_EXACT.contains(&text)
+            || is_main_title(text)
+            || text.starts_with(OUR_TITLES_PREFIX)
     }
 
     /// Refresh the snapshot of our top-level windows.
@@ -160,7 +166,8 @@ mod native_win {
         enumerate();
         if let Ok(list) = COLLECTED.lock() {
             for (hwnd, text) in list.iter() {
-                if is_ours(text) && text == title {
+                let title_matches = text == title || (title == "DM Ultra" && is_main_title(text));
+                if is_ours(text) && title_matches {
                     let mut rect = RectL::default();
                     if unsafe { GetWindowRect(*hwnd, &mut rect) } != 0 {
                         return Some((rect.left, rect.top, rect.right, rect.bottom));
@@ -202,8 +209,30 @@ const COLUMN_LABELS: [&str; 8] = [
     "File Name", "Queue", "Size", "Status", "Time left", "Transfer rate", "Last Try",
     "Description",
 ];
-const DEFAULT_COLUMN_WIDTHS: [f32; 8] = [220.0, 28.0, 72.0, 90.0, 80.0, 90.0, 90.0, 120.0];
+const DEFAULT_COLUMN_WIDTHS: [f32; 8] = [320.0, 80.0, 90.0, 100.0, 90.0, 115.0, 115.0, 200.0];
+const MIN_COLUMN_WIDTHS: [f32; 8] = [120.0, 56.0, 70.0, 72.0, 64.0, 78.0, 78.0, 100.0];
+const MAX_COLUMN_WIDTH: f32 = 1600.0;
 const COLUMN_RESIZE_HIT_WIDTH: f32 = 8.0;
+const COLUMN_CELL_PADDING: f32 = 6.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ColumnTrack {
+    column: usize,
+    width: f32,
+}
+
+fn column_tracks(widths: &[f32], visible: &[bool]) -> Vec<ColumnTrack> {
+    (0..COLUMN_LABELS.len())
+        .filter(|&column| visible.get(column).copied().unwrap_or(true))
+        .map(|column| ColumnTrack {
+            column,
+            width: widths
+                .get(column)
+                .copied()
+                .unwrap_or(DEFAULT_COLUMN_WIDTHS[column]),
+        })
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // Embedded Lucide SVG Icons from assets/icons
@@ -300,48 +329,6 @@ impl NavCategory {
             NavCategory::Scheduled    => "Scheduled",
             NavCategory::Queued       => "Queued",
             NavCategory::Paused       => "Paused",
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Responsive download-list column widths
-// ---------------------------------------------------------------------------
-#[derive(Clone, Copy)]
-struct ColumnWidths {
-    name: f32,
-    queue: f32,
-    size: f32,
-    status: f32,
-    time_left: f32,
-    transfer: f32,
-    last_try: f32,
-    description: f32,
-}
-
-impl ColumnWidths {
-    fn new(content_width: f32) -> Self {
-        // Fixed columns keep their reference proportions; the file-name
-        // column absorbs all remaining space so the table always spans the
-        // full width of the download-list region.
-        let queue = 24.0;
-        let size = 68.0;
-        let status = 88.0;
-        let time_left = 78.0;
-        let transfer = 88.0;
-        let last_try = 88.0;
-        let description = 104.0;
-        let fixed = queue + size + status + time_left + transfer + last_try + description;
-        let name = (content_width - fixed).max(110.0);
-        Self {
-            name,
-            queue,
-            size,
-            status,
-            time_left,
-            transfer,
-            last_try,
-            description,
         }
     }
 }
@@ -503,10 +490,6 @@ pub struct DmApp {
     column_widths: Vec<f32>,
     column_resize_start: Option<(usize, f32)>,
     column_visible: Vec<bool>,
-    /// Columns/widths used to lay out the table this frame (see
-    /// update_column_geometry).
-    display_columns: Vec<usize>,
-    display_widths: Vec<f32>,
 }
 
 impl DmApp {
@@ -586,8 +569,6 @@ impl DmApp {
             column_widths,
             column_resize_start: None,
             column_visible,
-            display_columns: (0..COLUMN_LABELS.len()).collect(),
-            display_widths: DEFAULT_COLUMN_WIDTHS.to_vec(),
         }
     }
 
@@ -964,24 +945,8 @@ impl DmApp {
             .count()
     }
 
-    fn update_column_geometry(&mut self) {
-        // Header and rows consume these same fixed tracks. The table region
-        // may have empty space after the final column, but no column is
-        // silently resized to fill it.
-        let visible: Vec<usize> = (0..COLUMN_LABELS.len())
-            .filter(|&index| self.column_visible.get(index).copied().unwrap_or(true))
-            .collect();
-        let widths: Vec<f32> = visible
-            .iter()
-            .map(|&index| {
-                self.column_widths
-                    .get(index)
-                    .copied()
-                    .unwrap_or(DEFAULT_COLUMN_WIDTHS[index])
-            })
-            .collect();
-        self.display_columns = visible;
-        self.display_widths = widths;
+    fn column_tracks(&self) -> Vec<ColumnTrack> {
+        column_tracks(&self.column_widths, &self.column_visible)
     }
 
     fn save_column_settings(&mut self) {
@@ -992,7 +957,7 @@ impl DmApp {
     }
 
     /// Sample live transfer rates from the manager's byte counters. The
-    /// display is smoothed over ~0.4 s samples so it stays readable.
+    /// display is smoothed over ~0.2 s samples so it stays readable.
     fn sample_speeds(&mut self) {
         let now = Instant::now();
         let active: Vec<u64> = {
@@ -1013,14 +978,14 @@ impl DmApp {
             match self.speed_samples.get(&id).copied() {
                 Some((then, previous)) => {
                     let elapsed = now.duration_since(then);
-                    if elapsed >= Duration::from_millis(400) {
+                    if elapsed >= Duration::from_millis(200) {
                         let dt = elapsed.as_secs_f64().max(0.001);
                         let instant = bytes.saturating_sub(previous) as f64 / dt;
                         let smoothed = self
                             .speeds
                             .get(&id)
                             .copied()
-                            .map(|value| value * 0.55 + instant * 0.45)
+                            .map(|value| value * 0.7 + instant * 0.3)
                             .unwrap_or(instant);
                         self.speeds.insert(id, smoothed.max(0.0));
                         self.speed_samples.insert(id, (now, bytes));
@@ -1116,6 +1081,12 @@ impl DmApp {
                 0 => file_name_of(a)
                     .to_lowercase()
                     .cmp(&file_name_of(b).to_lowercase()),
+                1 => a
+                    .queue
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .cmp(&b.queue.as_deref().unwrap_or("").to_lowercase()),
                 2 => a.file_size.cmp(&b.file_size),
                 3 => a.status.as_str().cmp(b.status.as_str()),
                 4 => remaining(a).cmp(&remaining(b)),
@@ -1390,11 +1361,14 @@ impl eframe::App for DmApp {
             }
         }
 
-        // Periodic manager reap and repaint request
+        // Reap finished tasks periodically; active transfers keep the UI
+        // repainting frequently enough for progress to look continuous.
         if self.last_update.elapsed() > Duration::from_millis(500) {
             self.manager.reap();
             self.last_update = Instant::now();
-            ctx.request_repaint();
+        }
+        if self.manager.active_count() > 0 {
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
 
         // Resolve the active appearance from settings and publish it for the
@@ -1742,24 +1716,20 @@ impl eframe::App for DmApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(bg_dark()))
             .show(ctx, |ui| {
-                let viewport_width = ui.available_width();
                 egui::ScrollArea::horizontal()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        // Column geometry, computed once per frame. Overflow
-                        // behavior follows IDM: columns keep their set widths and
-                        // the table scrolls horizontally; the last visible column
-                        // absorbs leftover space when there is any.
-                        let available = (viewport_width - 16.0).max(0.0);
-                        self.update_column_geometry();
-                        let visible_columns = self.display_columns.clone();
-                        let column_widths = self.display_widths.clone();
-                        let table_inner_width = available.max(column_widths.iter().sum());
+                        // Header and rows share fixed tracks; the list scrolls
+                        // horizontally whenever their total width exceeds the viewport.
+                        // Snapshot one layout for the entire frame so header
+                        // and body boundaries stay identical during a drag.
+                        let column_tracks = self.column_tracks();
+                        let table_inner_width: f32 =
+                            column_tracks.iter().map(|track| track.width).sum();
 
                 // Table header (single compact 27 px row)
                 egui::Frame::none()
                     .fill(bg_header())
-                    .inner_margin(Margin::symmetric(8.0, 0.0))
                     .show(ui, |ui| {
                         ui.set_height(27.0);
                         ui.set_min_width(table_inner_width);
@@ -1767,17 +1737,34 @@ impl eframe::App for DmApp {
                         // Column-boundary rules: (x edge, hovered, dragging).
                         let mut bounds: Vec<(f32, bool, bool)> = Vec::new();
                         ui.horizontal(|ui| {
-                            for (position, &column) in visible_columns.iter().enumerate() {
-                                let width = column_widths[position];
-                                let (cell_rect, clicked) = if column == 1 {
-                                    let (cell_rect, _) = ui.allocate_exact_size(
-                                        Vec2::new(width, 27.0),
-                                        Sense::hover(),
-                                    );
-                                    let search_icon = self.icons.get_or_render(ctx, "search", SVG_SEARCH, text_dim(), 14);
-                                    let icon_rect = Rect::from_min_size(
-                                        cell_rect.left_top(),
-                                        Vec2::splat(16.0),
+                            let mut header_cells = Vec::with_capacity(column_tracks.len());
+                            for track in &column_tracks {
+                                let has_search = track.column == 0;
+                                let (clicked, cell_rect) = self.table_header_cell(
+                                    ui,
+                                    COLUMN_LABELS[track.column],
+                                    track.column,
+                                    track.width,
+                                    has_search,
+                                );
+                                if clicked {
+                                    self.toggle_sort(track.column);
+                                }
+                                header_cells.push((*track, cell_rect, has_search));
+                            }
+
+                            let search_icon = self.icons.get_or_render(
+                                ctx,
+                                "search",
+                                SVG_SEARCH,
+                                text_dim(),
+                                14,
+                            );
+                            for (track, cell_rect, has_search) in header_cells {
+                                if has_search {
+                                    let icon_rect = Rect::from_center_size(
+                                        pos2(cell_rect.right() - 17.0, cell_rect.center().y),
+                                        Vec2::splat(14.0),
                                     );
                                     ui.painter().image(
                                         search_icon.id(),
@@ -1786,38 +1773,26 @@ impl eframe::App for DmApp {
                                         Color32::WHITE,
                                     );
                                     self.search_icon_rect = icon_rect;
-                                    let search_click_rect = Rect::from_min_max(
-                                        cell_rect.min,
-                                        pos2(
-                                            (cell_rect.right() - COLUMN_RESIZE_HIT_WIDTH * 0.5)
-                                                .max(cell_rect.left()),
-                                            cell_rect.bottom(),
-                                        ),
+                                    let search_rect = Rect::from_center_size(
+                                        icon_rect.center(),
+                                        Vec2::new(22.0, 24.0),
                                     );
-                                    let response = ui
+                                    let search_response = ui
                                         .interact(
-                                            search_click_rect,
+                                            search_rect,
                                             egui::Id::new("download-list-search"),
                                             Sense::click(),
                                         )
                                         .on_hover_text("Search downloads")
                                         .on_hover_cursor(CursorIcon::Default);
-                                    (cell_rect, response.clicked())
-                                } else {
-                                    let label = COLUMN_LABELS[column];
-                                    let (clicked, cell_rect) =
-                                        self.table_header_cell(ui, label, column, width);
-                                    (cell_rect, clicked)
-                                };
-                                if clicked {
-                                    if column == 1 {
+                                    if search_response.clicked() {
                                         self.search_open = !self.search_open;
                                         self.search_focus = self.search_open;
-                                    } else {
-                                        self.toggle_sort(column);
                                     }
                                 }
 
+                                // Register resize hit-zones after header
+                                // interactions so the handles win at edges.
                                 let boundary_x = cell_rect.right();
                                 let handle_rect = Rect::from_center_size(
                                     pos2(boundary_x, cell_rect.center().y),
@@ -1826,7 +1801,7 @@ impl eframe::App for DmApp {
                                 let handle_resp = ui
                                     .interact(
                                         handle_rect,
-                                        egui::Id::new(("download-column-resize", column)),
+                                        egui::Id::new(("download-column-resize", track.column)),
                                         Sense::click_and_drag(),
                                     )
                                     .on_hover_cursor(CursorIcon::ResizeHorizontal);
@@ -1837,17 +1812,18 @@ impl eframe::App for DmApp {
                                 ));
                                 if handle_resp.drag_started() {
                                     self.column_resize_start =
-                                        Some((column, self.column_widths[column]));
+                                        Some((track.column, self.column_widths[track.column]));
                                 }
                                 if handle_resp.dragged() {
                                     let start_width = self
                                         .column_resize_start
-                                        .filter(|(index, _)| *index == column)
+                                        .filter(|(index, _)| *index == track.column)
                                         .map(|(_, width)| width)
-                                        .unwrap_or(self.column_widths[column]);
-                                    self.column_widths[column] =
-                                        (start_width + handle_resp.drag_delta().x).max(40.0);
-                                    self.update_column_geometry();
+                                        .unwrap_or(self.column_widths[track.column]);
+                                    self.column_widths[track.column] = (start_width
+                                        + handle_resp.drag_delta().x)
+                                        .clamp(MIN_COLUMN_WIDTHS[track.column], MAX_COLUMN_WIDTH);
+                                    ctx.request_repaint();
                                 }
                                 if handle_resp.drag_stopped() {
                                     self.save_column_settings();
@@ -1967,13 +1943,14 @@ impl eframe::App for DmApp {
                             let mut row_bounds: Vec<f32> = Vec::new();
                             let row_resp = egui::Frame::none()
                                 .fill(bg_color)
-                                .inner_margin(Margin::symmetric(8.0, 5.0))
+                                .inner_margin(Margin::symmetric(0.0, 5.0))
                                 .show(ui, |ui| {
                                     ui.set_min_width(table_inner_width);
                                     ui.spacing_mut().item_spacing.x = 0.0;
                                     ui.horizontal(|ui| {
-                                        for (position, &column) in visible_columns.iter().enumerate() {
-                                            let width = column_widths[position];
+                                        for track in &column_tracks {
+                                            let column = track.column;
+                                            let width = track.width;
                                             let column_left = ui.cursor().min.x;
                                             match column {
                                                 0 => {
@@ -2877,6 +2854,7 @@ impl DmApp {
         label: &str,
         col: usize,
         width: f32,
+        has_search: bool,
     ) -> (bool, Rect) {
         let is_sorted = self.sort_column == col;
         let arrow = if is_sorted {
@@ -2888,10 +2866,17 @@ impl DmApp {
         let color = if is_sorted { text_main() } else { text_dim() };
 
         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 27.0), Sense::hover());
-        let click_rect = Rect::from_min_max(
-            rect.min,
+        let text_rect = Rect::from_min_max(
+            rect.min + Vec2::new(COLUMN_CELL_PADDING, 0.0),
             pos2(
-                (rect.right() - COLUMN_RESIZE_HIT_WIDTH * 0.5).max(rect.left()),
+                rect.right() - COLUMN_CELL_PADDING - if has_search { 30.0 } else { 0.0 },
+                rect.bottom(),
+            ),
+        );
+        let click_rect = Rect::from_min_max(
+            text_rect.min,
+            pos2(
+                (text_rect.right() - COLUMN_RESIZE_HIT_WIDTH * 0.5).max(text_rect.left()),
                 rect.bottom(),
             ),
         );
@@ -2900,8 +2885,8 @@ impl DmApp {
             egui::Id::new(("download-column-header", col)),
             Sense::click(),
         );
-        ui.painter().with_clip_rect(rect).text(
-            pos2(rect.left(), rect.center().y),
+        ui.painter().with_clip_rect(text_rect).text(
+            pos2(text_rect.left(), rect.center().y),
             Align2::LEFT_CENTER,
             text,
             FontId::proportional(12.0),
@@ -2963,7 +2948,8 @@ impl DmApp {
 /// short. The child UI clips and truncates content without changing the row
 /// layout's next column position.
 fn cell_label_left(ui: &mut Ui, width: f32, label: egui::Label) {
-    let (cell_rect, _) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::hover());
+    let (track_rect, _) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::hover());
+    let cell_rect = track_rect.shrink2(Vec2::new(COLUMN_CELL_PADDING, 0.0));
     let mut layout = egui::Layout::left_to_right(egui::Align::Center);
     layout.main_align = egui::Align::LEFT;
     layout.cross_align = egui::Align::Center;
@@ -2996,6 +2982,40 @@ mod table_cell_tests {
         assert_eq!(next_track_offset("x"), 120.0);
         let long_name = "long-download-filename-".repeat(16);
         assert_eq!(next_track_offset(&long_name), 120.0);
+    }
+
+    #[test]
+    fn visible_columns_share_one_contiguous_track_layout() {
+        let tracks = column_tracks(
+            &[120.0, 60.0, 80.0, 90.0, 70.0, 100.0, 100.0, 140.0],
+            &[true, false, true, true, true, true, true, true],
+        );
+
+        assert_eq!(
+            tracks.iter().map(|track| track.column).collect::<Vec<_>>(),
+            vec![0, 2, 3, 4, 5, 6, 7]
+        );
+        let boundaries: Vec<f32> = tracks
+            .iter()
+            .scan(0.0, |edge, track| {
+                *edge += track.width;
+                Some(*edge)
+            })
+            .collect();
+        assert_eq!(boundaries, vec![120.0, 200.0, 290.0, 360.0, 460.0, 560.0, 700.0]);
+    }
+
+    #[test]
+    fn saved_column_widths_are_clamped_to_sensible_limits() {
+        let mut settings = crate::state::Settings::default();
+        settings.list_col_widths = vec![1.0, f32::NAN, 80.0, 90.0, 80.0, 90.0, 90.0, 5000.0];
+
+        let widths = column_widths_from_settings(&settings);
+
+        assert_eq!(widths[0], MIN_COLUMN_WIDTHS[0]);
+        assert_eq!(widths[1], DEFAULT_COLUMN_WIDTHS[1]);
+        assert_eq!(widths[2], 80.0);
+        assert_eq!(widths[7], MAX_COLUMN_WIDTH);
     }
 }
 
@@ -3201,17 +3221,22 @@ fn is_file_type(path: &std::path::Path, exts: &[&str]) -> bool {
 }
 
 fn column_widths_from_settings(settings: &crate::state::Settings) -> Vec<f32> {
-    if settings.list_col_widths.len() == 8 {
-        let mut widths = settings.list_col_widths.clone();
-        for (index, width) in widths.iter_mut().enumerate() {
-            if !width.is_finite() || *width < 40.0 {
-                *width = DEFAULT_COLUMN_WIDTHS[index];
-            }
-        }
-        widths
+    let saved: &[f32] = if settings.list_col_widths.len() == COLUMN_LABELS.len() {
+        &settings.list_col_widths
     } else {
-        DEFAULT_COLUMN_WIDTHS.to_vec()
-    }
+        &DEFAULT_COLUMN_WIDTHS
+    };
+    saved
+        .iter()
+        .enumerate()
+        .map(|(index, width)| {
+            if width.is_finite() {
+                width.clamp(MIN_COLUMN_WIDTHS[index], MAX_COLUMN_WIDTH)
+            } else {
+                DEFAULT_COLUMN_WIDTHS[index]
+            }
+        })
+        .collect()
 }
 
 fn column_visible_from_settings(settings: &crate::state::Settings) -> Vec<bool> {
@@ -3418,12 +3443,13 @@ fn window_icon() -> Arc<egui::IconData> {
 }
 
 pub fn launch(manager: Arc<Manager>) -> Result<()> {
+    let title = format!("DM Ultra v{}", APP_VERSION.trim());
     let viewport = ViewportBuilder::default()
         // Outer window lands at roughly the 916 x 605 reference size once
         // the native title bar and frame are added.
         .with_inner_size([900.0, 566.0])
         .with_min_inner_size([720.0, 480.0])
-        .with_title("DM Ultra")
+        .with_title(title.clone())
         .with_icon(window_icon());
 
     let options = eframe::NativeOptions {
@@ -3432,7 +3458,6 @@ pub fn launch(manager: Arc<Manager>) -> Result<()> {
     };
 
     let app = DmApp::new(manager);
-    eframe::run_native("DM Ultra", options, Box::new(move |_cc| Box::new(app)))
+    eframe::run_native(&title, options, Box::new(move |_cc| Box::new(app)))
         .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
 }
-

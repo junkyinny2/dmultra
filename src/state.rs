@@ -312,9 +312,9 @@ pub struct Settings {
     pub category_dirs: bool,
     /// Periodically re-check completed files while the window is focused.
     pub idle_file_scan: bool,
-    /// Main downloads list column widths in px (File Name, Q, Size, Status,
-    /// Time left, Transfer rate, Last Try). Empty = use defaults; the
-    /// Description column always takes the remaining width.
+    /// Main downloads list column widths in px (File Name, Queue, Size,
+    /// Status, Time left, Transfer rate, Last Try, Description). Empty =
+    /// use defaults.
     pub list_col_widths: Vec<f32>,
     /// Visibility of the main downloads list columns (File Name, Queue,
     /// Size, Status, Time left, Transfer rate, Last Try, Description).

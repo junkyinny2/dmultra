@@ -10,11 +10,12 @@ fn main() {
         use winres::WindowsResource;
 
         let mut res = WindowsResource::new();
+        let file_version = format!("{}.0", env!("CARGO_PKG_VERSION"));
         res.set_icon("assets/icons/icon.ico");
         res.set("FileDescription", "DM Ultra Download Manager");
-        res.set("FileVersion", "1.0.0.0");
+        res.set("FileVersion", &file_version);
         res.set("ProductName", "DM Ultra");
-        res.set("ProductVersion", "1.0.0.0");
+        res.set("ProductVersion", &file_version);
         res.set("CompanyName", "DM Ultra");
         res.set("LegalCopyright", "Copyright (C) 2026");
         res.set("OriginalFilename", "dmultra.exe");
