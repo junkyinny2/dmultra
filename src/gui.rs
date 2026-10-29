@@ -97,6 +97,14 @@ fn bg_badge_sel() -> Color32 { current_palette().nav_selected }
 
 fn border_hairline() -> Color32 { current_palette().hairline }
 
+fn grid_line() -> Color32 {
+    // Between the hairline and the muted text tone so the cell rules are
+    // clearly visible on the row backgrounds in both light and dark themes.
+    let p = current_palette();
+    let f = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * 0.55).round() as u8;
+    Color32::from_rgb(f(p.border.r(), p.muted.r()), f(p.border.g(), p.muted.g()), f(p.border.b(), p.muted.b()))
+}
+
 fn text_main() -> Color32 { current_palette().text }
 fn text_dim() -> Color32 { current_palette().muted }
 fn text_badge() -> Color32 { current_palette().muted }
@@ -329,7 +337,10 @@ pub struct DmApp {
     // Resizable/reorderable download-list columns
     column_widths: Vec<f32>,
     column_visible: Vec<bool>,
-    columns_dragging: bool,
+    /// Columns/widths used to lay out the table this frame (see
+    /// update_column_geometry).
+    display_columns: Vec<usize>,
+    display_widths: Vec<f32>,
 }
 
 impl DmApp {
@@ -387,7 +398,8 @@ impl DmApp {
             last_update: Instant::now(),
             column_widths,
             column_visible,
-            columns_dragging: false,
+            display_columns: (0..COLUMN_LABELS.len()).collect(),
+            display_widths: DEFAULT_COLUMN_WIDTHS.to_vec(),
         }
     }
 
@@ -687,8 +699,12 @@ impl DmApp {
             .count()
     }
 
-    fn column_layout(&self, available: f32) -> (Vec<usize>, Vec<f32>) {
-        let visible: Vec<usize> = (0..8)
+    fn update_column_geometry(&mut self, available: f32) {
+        // Columns/widths used to lay out the table this frame. User widths
+        // are honored exactly (min 40 px). When they do not fill the window
+        // the last visible column stretches; when they overflow the window
+        // the table scrolls horizontally (IDM-style).
+        let visible: Vec<usize> = (0..COLUMN_LABELS.len())
             .filter(|&index| self.column_visible.get(index).copied().unwrap_or(true))
             .collect();
         let mut widths: Vec<f32> = visible
@@ -701,10 +717,13 @@ impl DmApp {
             })
             .collect();
         let sum: f32 = widths.iter().sum();
-        if let Some(last) = widths.last_mut() {
-            *last = (*last + (available - sum)).max(40.0);
+        if sum < available {
+            if let Some(last) = widths.last_mut() {
+                *last = (*last + (available - sum)).max(40.0);
+            }
         }
-        (visible, widths)
+        self.display_columns = visible;
+        self.display_widths = widths;
     }
 
     fn save_column_settings(&mut self) {
@@ -1468,10 +1487,14 @@ impl eframe::App for DmApp {
                 egui::ScrollArea::horizontal()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        // Keep one shared column geometry for the header and rows so
-                        // the table lines up at every window width.
-                        let (visible_columns, column_widths) =
-                            self.column_layout(viewport_width - 16.0);
+                        // Column geometry, computed once per frame. Overflow
+                        // behavior follows IDM: columns keep their set widths and
+                        // the table scrolls horizontally; the last visible column
+                        // absorbs leftover space when there is any.
+                        let available = viewport_width - 16.0;
+                        self.update_column_geometry(available);
+                        let visible_columns = self.display_columns.clone();
+                        let column_widths = self.display_widths.clone();
 
                 // Table header (single compact 27 px row)
                 egui::Frame::none()
@@ -1480,6 +1503,8 @@ impl eframe::App for DmApp {
                     .show(ui, |ui| {
                         ui.set_height(27.0);
                         ui.spacing_mut().item_spacing.x = 0.0;
+                        // Column-boundary rules: (x center, hovered, dragging).
+                        let mut bounds: Vec<(f32, bool, bool)> = Vec::new();
                         ui.horizontal_centered(|ui| {
                             for (position, &column) in visible_columns.iter().enumerate() {
                                 let width = column_widths[position];
@@ -1514,42 +1539,44 @@ impl eframe::App for DmApp {
                                     }
                                 }
 
-                                // Draggable resize handle between columns.
+                                // Draggable boundary between columns. Dragging moves
+                                // the boundary itself (IDM-style): only the column to
+                                // its left changes width and later columns shift.
                                 if position + 1 < visible_columns.len() {
                                     let (handle_rect, handle_resp) = ui.allocate_exact_size(
-                                        Vec2::new(6.0, 20.0),
+                                        Vec2::new(6.0, 27.0),
                                         Sense::click_and_drag(),
                                     );
-                                    let color = if handle_resp.hovered() || handle_resp.dragged() {
-                                        text_main()
-                                    } else {
-                                        border_hairline()
-                                    };
-                                    ui.painter().vline(
+                                    bounds.push((
                                         handle_rect.center().x,
-                                        handle_rect.y_range(),
-                                        Stroke::new(1.0, color),
-                                    );
+                                        handle_resp.hovered(),
+                                        handle_resp.dragged(),
+                                    ));
                                     if handle_resp.dragged() {
-                                        let delta = handle_resp.drag_delta().x;
                                         let left = visible_columns[position];
-                                        let right = visible_columns[position + 1];
                                         let old_left = self.column_widths[left];
-                                        let old_right = self.column_widths[right];
-                                        let max_increase = old_right - 40.0;
-                                        let max_decrease = old_left - 40.0;
-                                        let limited = delta.clamp(-max_decrease, max_increase);
-                                        self.column_widths[left] = old_left + limited;
-                                        self.column_widths[right] = old_right - limited;
-                                        self.columns_dragging = true;
+                                        self.column_widths[left] =
+                                            (old_left + handle_resp.drag_delta().x).max(40.0);
+                                        self.update_column_geometry(available);
                                     }
                                     if handle_resp.drag_stopped() {
-                                        self.columns_dragging = false;
                                         self.save_column_settings();
                                     }
                                 }
                             }
                         });
+
+                        // Grid rules between columns, spanning the full header
+                        // height. Hovering/dragging a boundary highlights it.
+                        for &(x, hovered, dragging) in &bounds {
+                            let active = hovered || dragging;
+                            let stroke = if active {
+                                Stroke::new(2.0, text_main())
+                            } else {
+                                Stroke::new(1.0, grid_line())
+                            };
+                            ui.painter().vline(x, ui.max_rect().y_range(), stroke);
+                        }
 
                         ui.painter().hline(
                             ui.max_rect().x_range(),
@@ -1631,6 +1658,8 @@ impl eframe::App for DmApp {
                     });
                 } else {
                     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                        // Flush rows so the horizontal rules connect into a grid.
+                        ui.spacing_mut().item_spacing.y = 0.0;
                         for (row_idx, d) in items.iter().enumerate() {
                             let is_selected = self.selected_download_id == Some(d.id);
                             let bg_color = if is_selected {
@@ -1651,13 +1680,12 @@ impl eframe::App for DmApp {
                                 .unwrap_or(0.0)
                                 .round() as u64;
 
+                            let mut row_bounds: Vec<f32> = Vec::new();
                             let row_resp = egui::Frame::none()
                                 .fill(bg_color)
                                 .inner_margin(Margin::symmetric(8.0, 5.0))
                                 .show(ui, |ui| {
                                     ui.spacing_mut().item_spacing.x = 0.0;
-                                    let (visible_columns, column_widths) =
-                                        self.column_layout(ui.available_width());
                                     ui.horizontal(|ui| {
                                         for (position, &column) in visible_columns.iter().enumerate() {
                                             let width = column_widths[position];
@@ -1775,46 +1803,32 @@ impl eframe::App for DmApp {
                                             }
 
                                             if position + 1 < visible_columns.len() {
-                                                let (handle_rect, handle_resp) = ui
+                                                let (handle_rect, _resp) = ui
                                                     .allocate_exact_size(
                                                         Vec2::new(6.0, 18.0),
-                                                        Sense::click_and_drag(),
+                                                        Sense::hover(),
                                                     );
-                                                let color = if handle_resp.hovered()
-                                                    || handle_resp.dragged()
-                                                {
-                                                    text_main()
-                                                } else {
-                                                    border_hairline()
-                                                };
-                                                ui.painter().vline(
-                                                    handle_rect.center().x,
-                                                    handle_rect.y_range(),
-                                                    Stroke::new(1.0, color),
-                                                );
-                                                if handle_resp.dragged() {
-                                                    let delta = handle_resp.drag_delta().x;
-                                                    let left = visible_columns[position];
-                                                    let right = visible_columns[position + 1];
-                                                    let old_left = self.column_widths[left];
-                                                    let old_right = self.column_widths[right];
-                                                    let max_increase = old_right - 40.0;
-                                                    let max_decrease = old_left - 40.0;
-                                                    let limited = delta.clamp(-max_decrease, max_increase);
-                                                    self.column_widths[left] = old_left + limited;
-                                                    self.column_widths[right] = old_right - limited;
-                                                    self.columns_dragging = true;
-                                                }
-                                                if handle_resp.drag_stopped() {
-                                                    self.columns_dragging = false;
-                                                    self.save_column_settings();
-                                                }
+                                                row_bounds.push(handle_rect.center().x);
                                             }
                                         }
                                     });
                                 })
                                 .response
                                 .on_hover_cursor(CursorIcon::Default);
+
+                            // IDM-style grid rules: vertical cell separators for this
+                            // row and a rule under it, spanning the full row height.
+                            {
+                                let rect = row_resp.rect;
+                                for &x in &row_bounds {
+                                    ui.painter().vline(x, rect.y_range(), Stroke::new(1.0, grid_line()));
+                                }
+                                ui.painter().hline(
+                                    rect.x_range(),
+                                    rect.bottom(),
+                                    Stroke::new(1.0, grid_line()),
+                                );
+                            }
 
                             // Handle selection and double-click to open popout
                             if row_resp.interact(Sense::click()).clicked() {
