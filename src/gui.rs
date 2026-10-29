@@ -1973,6 +1973,12 @@ impl eframe::App for DmApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.tray_icon = None;
     }
+
+    /// Paint any area the UI does not cover (e.g. during a viewport resize)
+    /// in the active theme background instead of a foreign color.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        bg_dark().to_normalized_gamma_f32()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2660,35 +2666,20 @@ fn render_segmented_progress(
 }
 
 fn apply_app_style(ctx: &egui::Context) {
-    let palette = current_palette();
-    let mut style = (*ctx.style()).clone();
-    style.visuals.dark_mode = palette.dark;
-    style.visuals.override_text_color = Some(text_main());
-    style.visuals.panel_fill = bg_dark();
-    style.visuals.window_fill = bg_dark();
-    style.visuals.faint_bg_color = bg_panel();
-    style.visuals.extreme_bg_color = Color32::from_rgb(22, 26, 33);
-    style.visuals.widgets.inactive.bg_fill = bg_panel();
-    style.visuals.widgets.hovered.bg_fill = bg_row_hover();
-    style.visuals.widgets.active.bg_fill = bg_row_selected();
-    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, border_hairline());
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, border_hairline());
-    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, border_hairline());
-    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, text_dim());
-    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, text_main());
-    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, text_main());
-    style.visuals.widgets.noninteractive.bg_fill = bg_dark();
-    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border_hairline());
-    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, text_main());
-    style.visuals.selection.bg_fill = bg_row_selected();
-    style.visuals.selection.stroke = Stroke::new(1.0, text_main());
-    style.visuals.window_stroke = Stroke::new(1.0, border_hairline());
-    style.spacing.item_spacing = Vec2::new(6.0, 4.0);
-    style.interaction.selectable_labels = false;
-    ctx.set_style(style);
+    // One complete, palette-driven override for the whole context (see
+    // options::apply_global_theme_style).
+    options::apply_global_theme_style(ctx, &current_palette());
+    style_spacing(ctx);
 
     // Install native Windows Segoe UI fonts
     options::install_fonts(ctx);
+}
+
+/// Small spacing tweaks kept separate from the color theme.
+fn style_spacing(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = Vec2::new(6.0, 4.0);
+    ctx.set_style(style);
 }
 
 fn is_file_type(path: &std::path::Path, exts: &[&str]) -> bool {

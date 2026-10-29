@@ -266,6 +266,49 @@ pub fn accent_color(name: &str) -> Color32 {
     }
 }
 
+/// Apply the complete theme to `ctx`, overwriting every style field egui
+/// widgets read. This includes all five widget states (noninteractive,
+/// inactive, hovered, active, open) and their `weak_bg_fill`, which egui
+/// uses to paint buttons and menu items. Overwriting everything every frame
+/// guarantees no default or previously-applied light-mode value (e.g. a white
+/// button background) can leak through in dark mode.
+pub fn apply_global_theme_style(ctx: &egui::Context, pal: &ThemePalette) {
+    let mut style = (*ctx.style()).clone();
+    let v = &mut style.visuals;
+
+    v.dark_mode = pal.dark;
+    v.override_text_color = Some(pal.text);
+    v.panel_fill = pal.background;
+    v.window_fill = pal.background;
+    v.faint_bg_color = pal.surface;
+    v.extreme_bg_color = pal.surface2;
+    v.hyperlink_color = pal.accent;
+    v.warn_fg_color = pal.warning;
+    v.error_fg_color = pal.destructive;
+    v.window_stroke = egui::Stroke::new(1.0, pal.border);
+    v.popup_shadow = egui::epaint::Shadow::NONE;
+
+    let states = [
+        (&mut v.widgets.noninteractive, (pal.background, pal.border, pal.text)),
+        (&mut v.widgets.inactive, (pal.surface, pal.border, pal.text)),
+        (&mut v.widgets.hovered, (pal.nav_hover, pal.border, pal.text)),
+        (&mut v.widgets.active, (pal.nav_selected, pal.accent, pal.text)),
+        (&mut v.widgets.open, (pal.nav_hover, pal.border, pal.text)),
+    ];
+    for (state, (bg, stroke, fg)) in states {
+        state.bg_fill = bg;
+        state.weak_bg_fill = bg;
+        state.bg_stroke = egui::Stroke::new(1.0, stroke);
+        state.fg_stroke = egui::Stroke::new(1.0, fg);
+    }
+
+    v.selection.bg_fill = pal.nav_selected;
+    v.selection.stroke = egui::Stroke::new(1.0, pal.text);
+
+    style.interaction.selectable_labels = false;
+    ctx.set_style(style);
+}
+
 fn custom_accent_rgb(name: &str) -> [u8; 3] {
     let color = accent_color(name);
     [color.r(), color.g(), color.b()]
@@ -952,32 +995,8 @@ impl SettingsDialog {
     fn body(&mut self, ui: &mut Ui, pal: ThemePalette) {
         self.check_proxy_test();
         let ctx = ui.ctx().clone();
-        let mut style = (*ctx.style()).clone();
-        style.visuals.dark_mode = pal.dark;
-        style.visuals.override_text_color = Some(pal.text);
-        style.visuals.panel_fill = pal.background;
-        style.visuals.window_fill = pal.background;
-        style.visuals.faint_bg_color = pal.surface;
-        style.visuals.extreme_bg_color = pal.surface;
-        style.visuals.widgets.inactive.bg_fill = pal.surface;
-        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, pal.border);
-        style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, pal.text);
-        style.visuals.widgets.hovered.bg_fill = pal.surface2;
-        style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, pal.border);
-        style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, pal.text);
-        style.visuals.widgets.active.bg_fill = pal.accent;
-        style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, pal.accent);
-        style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
-        style.visuals.widgets.noninteractive.bg_fill = pal.background;
-        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, pal.border);
-        style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, pal.text);
-        style.visuals.selection.bg_fill = pal.accent;
-        style.visuals.selection.stroke = egui::Stroke::new(1.0, Color32::WHITE);
-        style.visuals.window_stroke = egui::Stroke::new(1.0, pal.border);
-        style.visuals.popup_shadow = egui::epaint::Shadow::NONE;
-        style.visuals.selection.stroke = egui::Stroke::new(1.0, Color32::WHITE);
-        style.interaction.selectable_labels = false;
-        ctx.set_style(style);
+        // One shared, complete theme override (also used by the main window).
+        apply_global_theme_style(&ctx, &pal);
 
         ui.style_mut().spacing.button_padding = egui::vec2(10.0, 5.0);
         ui.style_mut().spacing.item_spacing = egui::vec2(8.0, 6.0);
