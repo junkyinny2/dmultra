@@ -56,6 +56,17 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// Per-download options threaded from the manager / CLI into the engine.
+#[derive(Clone, Default)]
+pub struct JobOptions {
+    pub referer: Option<String>,
+    pub auth: Option<(String, String)>,
+    /// Raw `Cookie` header captured from the browser (applied in phase 4).
+    #[allow(dead_code)]
+    pub cookies: Option<String>,
+    pub conn_limit: Option<Arc<AtomicU32>>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StopReason {
     Cancelled,
@@ -92,6 +103,7 @@ pub struct Shared {
     pub settings: Settings,
     pub referer: Option<String>,
     pub auth: Option<(String, String)>,
+    pub cookies: Option<String>,
     pub max_connections: u32,
     pub http: Option<reqwest::Client>,
     pub part_dir: PathBuf,
@@ -259,10 +271,14 @@ pub async fn run(
     quota: Option<Arc<QuotaTracker>>,
     cancel: watch::Receiver<bool>,
     ui: Option<Arc<dyn ProgressSink>>,
-    referer: Option<String>,
-    auth: Option<(String, String)>,
-    conn_limit: Arc<AtomicU32>,
+    opts: JobOptions,
 ) -> (DownloadRec, Outcome) {
+    let referer = opts.referer.clone();
+    let auth = opts.auth.clone();
+    let conn_limit = opts
+        .conn_limit
+        .clone()
+        .unwrap_or_else(|| Arc::new(AtomicU32::new(8)));
     // HLS playlists (.m3u8) use a dedicated segment-downloading path
     // (IDM-style video grabbing). The assembled output is a single
     // concatenated file.
@@ -314,6 +330,7 @@ pub async fn run(
             ui.clone(),
             referer.clone(),
             auth.clone(),
+            opts.cookies.clone(),
             conn_limit.clone(),
         )
         .await;
@@ -439,6 +456,7 @@ async fn run_attempt(
     ui: Option<Arc<dyn ProgressSink>>,
     referer: Option<String>,
     auth: Option<(String, String)>,
+    cookies: Option<String>,
     conn_limit: Arc<AtomicU32>,
 ) -> (DownloadRec, Result<Outcome, StopReason>) {
     let mut rec = rec.clone();
@@ -607,6 +625,7 @@ async fn run_attempt(
         settings,
         referer,
         auth,
+        cookies: cookies.clone(),
         max_connections: max_conn,
         http: http_client,
         part_dir: part_dir.clone(),

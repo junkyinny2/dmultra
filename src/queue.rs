@@ -185,6 +185,13 @@ pub async fn run_queue(
             .max_connections
             .unwrap_or(state.lock().await.settings.max_connections)
             .clamp(1, 32);
+        let rec_cookies = rec.cookies.clone();
+        let opts = engine::JobOptions {
+            referer: rec.referer.clone(),
+            auth: None,
+            cookies: rec_cookies,
+            conn_limit: Some(Arc::new(AtomicU32::new(start_conn))),
+        };
         let (updated, outcome) = engine::run(
             state.clone(),
             rec.clone(),
@@ -192,14 +199,12 @@ pub async fn run_queue(
             Some(quota.clone()),
             cancel.clone(),
             None,
-            None,
-            None,
-            Arc::new(AtomicU32::new(start_conn)),
+            opts,
         )
         .await;
 
         rec = updated;
-        match outcome {
+        match &outcome {
             Outcome::Complete { total } => {
                 println!(
                     "Download complete. Downloaded {total} Bytes Total\nFile saved as {}",
@@ -214,7 +219,12 @@ pub async fn run_queue(
                 println!("Download failed. {msg}");
             }
         }
+        let settings = state.lock().await.settings.clone();
+        crate::postdownload::on_complete(&settings, &rec, &outcome, true);
     }
+
+    let settings = state.lock().await.settings.clone();
+    crate::postdownload::on_queue_finished(&settings);
 
     // Post-completion action.
     if let Some(s) = &schedule {

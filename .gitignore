@@ -5,3 +5,4 @@
 *.xpi
 browser-key.xml
 desktop_strings*.txt
+idm-ghidra-decompile/

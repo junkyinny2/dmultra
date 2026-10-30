@@ -22,6 +22,7 @@ mod manager;
 #[cfg(windows)]
 mod overlay;
 mod options;
+mod postdownload;
 mod queue;
 mod state;
 mod ui;
@@ -258,6 +259,14 @@ pub(crate) fn new_rec(st: &mut State, url: &str, output: Option<PathBuf>, queue:
         group: None,
         description: String::new(),
         max_connections: None,
+        host_connections: None,
+        referer: None,
+        cookies: None,
+        user_agent: None,
+        post_action: None,
+        url_history: Vec::new(),
+        quality: None,
+        mux: None,
         mirrors: Vec::new(),
         temp_dir,
         restarted: false,
@@ -283,6 +292,13 @@ pub async fn download_rec(
         .max_connections
         .unwrap_or(st.lock().await.settings.max_connections)
         .clamp(1, 32);
+    let rec_cookies = rec.cookies.clone();
+    let opts = engine::JobOptions {
+        referer,
+        auth,
+        cookies: rec_cookies,
+        conn_limit: Some(Arc::new(AtomicU32::new(start_conn))),
+    };
     let result = engine::run(
         st,
         rec.clone(),
@@ -290,9 +306,7 @@ pub async fn download_rec(
         None,
         cancel,
         Some(ui.clone()),
-        referer,
-        auth,
-        Arc::new(AtomicU32::new(start_conn)),
+        opts,
     )
     .await;
     ui.finish(&result.1);

@@ -2072,6 +2072,34 @@ impl eframe::App for DmApp {
             });
 
         // -------------------------------------------------------------------
+        // 2b. Post-download power-action banner (cancellable countdown)
+        // -------------------------------------------------------------------
+        if let Some((action, rem)) = crate::postdownload::power_pending() {
+            egui::TopBottomPanel::bottom("postaction_banner")
+                .exact_height(28.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(0x3a, 0x1f, 0x1f))
+                        .inner_margin(Margin::symmetric(7.0, 0.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Power action '{action}' in {rem}s"
+                            ))
+                            .size(11.5)
+                            .color(egui::Color32::from_rgb(0xff, 0xcc, 0xcc)),
+                        );
+                        if ui.button("Cancel").clicked() {
+                            crate::postdownload::cancel_power();
+                        }
+                    });
+                });
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+
+        // -------------------------------------------------------------------
         // 3. Status Bar (Bottom)
         // -------------------------------------------------------------------
         egui::TopBottomPanel::bottom("statusbar")
@@ -3059,6 +3087,14 @@ impl DmApp {
             group: None,
             description,
             max_connections: Some(connections),
+            host_connections: None,
+            referer: self.add_dialog.referer.clone(),
+            cookies: None,
+            user_agent: None,
+            post_action: None,
+            url_history: Vec::new(),
+            quality: None,
+            mux: None,
             mirrors: Vec::new(),
             temp_dir: st.settings.temp_path.clone(),
             restarted: false,

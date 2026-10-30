@@ -197,13 +197,21 @@ impl Manager {
                 .clamp(1, 32),
         ));
         let conn_limit_task = conn_limit.clone();
+        let rec_cookies = rec.cookies.clone();
         let handle = runtime().spawn(async move {
             crate::hooks::notify(&state, crate::hooks::EVENT_STARTED, &rec).await;
-            let _ = engine::run(
-                state, rec, limiter, Some(quota), cancel_rx, Some(sink), referer, auth,
-                conn_limit_task,
+            let opts = engine::JobOptions {
+                referer,
+                auth,
+                cookies: rec_cookies,
+                conn_limit: Some(conn_limit_task),
+            };
+            let (updated_rec, outcome) = engine::run(
+                state.clone(), rec, limiter, Some(quota), cancel_rx, Some(sink), opts,
             )
             .await;
+            let settings = { state.lock().await.settings.clone() };
+            crate::postdownload::on_complete(&settings, &updated_rec, &outcome, false);
             let _ = fin_tx.send(true);
         });
         self.active.lock().unwrap().insert(
@@ -376,20 +384,27 @@ impl Manager {
                         .clamp(1, 32),
                 ));
                 let conn_limit_task = conn_limit.clone();
+                let rec_cookies = rec.cookies.clone();
                 let handle = runtime().spawn(async move {
                     crate::hooks::notify(&state, crate::hooks::EVENT_STARTED, &rec).await;
-                    let _ = engine::run(
-                        state,
+                    let opts = engine::JobOptions {
+                        referer: None,
+                        auth: None,
+                        cookies: rec_cookies,
+                        conn_limit: Some(conn_limit_task),
+                    };
+                    let (updated_rec, outcome) = engine::run(
+                        state.clone(),
                         rec,
                         limiter,
                         Some(quota),
                         item_cancel,
                         Some(sink),
-                        None,
-                        None,
-                        conn_limit_task,
+                        opts,
                     )
                     .await;
+                    let settings = { state.lock().await.settings.clone() };
+                    crate::postdownload::on_complete(&settings, &updated_rec, &outcome, true);
                     let _ = fin_tx.send(true);
                 });
                 manager.active.lock().unwrap().insert(

@@ -889,6 +889,7 @@ impl SettingsDialog {
         self.num.clear();
         self.num.insert("threads", self.draft.max_connections.to_string());
         self.num.insert("limit", (self.draft.speed_limit_bps / 1024).max(1).to_string());
+self.num.insert("power-delay", self.draft.power_delay_secs.to_string());
         self.num.insert("quota_mb", self.draft.quota.mb.to_string());
         self.num.insert("quota_start", self.draft.quota.start_hour.to_string());
         self.num.insert("quota_end", self.draft.quota.end_hour.to_string());
@@ -2518,6 +2519,90 @@ impl SettingsDialog {
                     });
                 });
             }
+            let hit = self.section_hit("After Download", None);
+            if self.rows_hit(
+                hit,
+                &[
+                    ("Post-download action", "What to do when a download completes."),
+                    ("Run program", "Launch a program after a download completes."),
+                    ("Antivirus scan", "Scan finished files with an antivirus."),
+                ],
+            ) {
+                section_card(ui, pal, Some(("After Download", None)), |ui, drawn| {
+                    let mut first = true;
+                    srow!(self, ui, pal, first, drawn, hit, "Post-download action", "What to do when a download completes.", |ui| {
+                        let mut value = self.draft.post_action.clone();
+                        if dropdown(
+                            ui,
+                            pal,
+                            "post-action",
+                            &mut value,
+                            180.0,
+                            &[
+                                ("none", "Do nothing"),
+                                ("program", "Run a program"),
+                                ("exit", "Exit DM Ultra"),
+                                ("shutdown", "Shut down the PC"),
+                                ("restart", "Restart the PC"),
+                                ("sleep", "Sleep"),
+                                ("hibernate", "Hibernate"),
+                            ],
+                        ) {
+                            self.draft.post_action = value;
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Run program", "Launch a program after a download completes (%file%, %folder%, %filename%, %url%).", |ui| {
+                        if text_input(ui, pal, &mut self.draft.post_program, 220.0, "C:\\path\\to\\program.exe").changed() {
+                            self.set_dirty();
+                        }
+                        if button(ui, pal, "Browse\u{2026}", Btn::Secondary).clicked() {
+                            if let Some(p) = rfd::FileDialog::new().pick_file() {
+                                self.draft.post_program = p.display().to_string();
+                                self.set_dirty();
+                            }
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Program arguments", "Arguments passed to the program.", |ui| {
+                        if text_input(ui, pal, &mut self.draft.post_program_args, 220.0, "").changed() {
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Wait for queue", "Defer power actions until the whole queue finishes.", |ui| {
+                        if toggle(ui, pal, &mut self.draft.post_wait_queue).clicked() {
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Antivirus scan", "Scan finished files with an antivirus.", |ui| {
+                        if toggle(ui, pal, &mut self.draft.virus_enabled).clicked() {
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Antivirus program", "Antivirus executable to run (%file%).", |ui| {
+                        if text_input(ui, pal, &mut self.draft.virus_program, 220.0, "").changed() {
+                            self.set_dirty();
+                        }
+                        if button(ui, pal, "Browse\u{2026}", Btn::Secondary).clicked() {
+                            if let Some(p) = rfd::FileDialog::new().pick_file() {
+                                self.draft.virus_program = p.display().to_string();
+                                self.set_dirty();
+                            }
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Antivirus arguments", "Arguments passed to the antivirus.", |ui| {
+                        if text_input(ui, pal, &mut self.draft.virus_args, 220.0, "%file%").changed() {
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Power delay (s)", "Seconds to wait before a power action executes.", |ui| {
+                        if let Some(v) = self.number_row(ui, pal, "power-delay", 120.0, "s") {
+                            self.draft.power_delay_secs = (v.round() as u32).max(1);
+                            self.set_dirty();
+                        }
+                    });
+                });
+            }
+
             let hit = self.section_hit("Quota", None);
             if self.rows_hit(
                 hit,
