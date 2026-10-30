@@ -37,9 +37,16 @@
 - Per-download User-Agent override applied to engine + client.
 - Referer already threaded (confirmed).
 
-## v0.035 … v0.038 (not started)
-- Phase 5: browser parity (extension panel, Site Grabber depth, video sniffing).
-- Phase 6: DASH + built-in fMP4 remux + FFmpeg hook.
-- Phase 7: RTSP + scheduler/dial-up + MMS fallback.
-- Phase 8: FTP/proxy/language audit + full parity audit.
-- See `PARITY_PLAN.md`.
+## v0.035 (released)
+- Browser parity pass (extension + native messaging host robustness).
+
+## v0.036 (released)
+- DASH (.mpd) download support + optional FFmpeg remux hook.
+
+## v0.037 (released)
+- RTSP recording (interleaved RTP) + MMS HTTP fallback.
+
+## v0.038 (released)
+- FTP/proxy/language audit: PAC URL, proxy-from-IE toggle, FFmpeg path UI,
+  i18n loader + locales/en.json.
+- Full parity audit pass (see PARITY_PLAN.md matrix).
