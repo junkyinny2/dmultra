@@ -448,7 +448,7 @@ pub async fn run(
 async fn run_attempt(
     state: Arc<Mutex<State>>,
     rec: &DownloadRec,
-    settings: Settings,
+    mut settings: Settings,
     single_conn: bool,
     limiter: Arc<SpeedLimiter>,
     quota: Option<Arc<QuotaTracker>>,
@@ -460,6 +460,9 @@ async fn run_attempt(
     conn_limit: Arc<AtomicU32>,
 ) -> (DownloadRec, Result<Outcome, StopReason>) {
     let mut rec = rec.clone();
+    if let Some(ua) = &rec.user_agent {
+        settings.user_agent = ua.clone();
+    }
     rec.status = Status::Downloading;
     rec.last_try_date = crate::state::unix_now() as i64;
 
@@ -490,6 +493,7 @@ async fn run_attempt(
                 &client,
                 &url,
                 referer.as_deref(),
+                cookies.as_deref(),
                 auth_ref,
                 Some((&rec.etag, &rec.last_modified)),
             )
@@ -1007,6 +1011,7 @@ async fn download_chunk_http(
             start,
             range_end,
             shared.referer.as_deref(),
+            shared.cookies.as_deref(),
             auth_ref,
         )
         .await

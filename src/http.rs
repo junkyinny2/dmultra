@@ -293,6 +293,7 @@ pub async fn probe(
     client: &Client,
     url: &Url,
     referer: Option<&str>,
+    cookies: Option<&str>,
     auth: Option<(&str, &str)>,
     resume: Option<(&Option<String>, &Option<String>)>,
 ) -> Result<Probe> {
@@ -307,6 +308,9 @@ pub async fn probe(
             .header("Range", "bytes=0-"); // open-probe form
         if let Some(r) = referer.filter(|s| !s.is_empty()) {
             req = req.header("Referer", r);
+        }
+        if let Some(c) = cookies.filter(|s| !s.is_empty()) {
+            req = req.header("Cookie", c);
         }
         req = apply_auth(req, auth.map(|a| a.0), auth.map(|a| a.1));
         if let Some((etag, last_modified)) = resume {
@@ -392,6 +396,7 @@ pub async fn ranged_get(
     start: u64,
     end: Option<u64>,
     referer: Option<&str>,
+    cookies: Option<&str>,
     auth: Option<(&str, &str)>,
 ) -> Result<Response> {
     let build = |extra_auth: Option<String>| {
@@ -407,6 +412,9 @@ pub async fn ranged_get(
             .header("Range", range);
         if let Some(r) = referer.filter(|s| !s.is_empty()) {
             req = req.header("Referer", r);
+        }
+        if let Some(c) = cookies.filter(|s| !s.is_empty()) {
+            req = req.header("Cookie", c);
         }
         req = apply_auth(req, auth.map(|a| a.0), auth.map(|a| a.1));
         if let Some(h) = extra_auth {
