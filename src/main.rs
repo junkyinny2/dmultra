@@ -26,6 +26,7 @@ mod overlay;
 mod options;
 mod postdownload;
 mod queue;
+mod rtsp;
 mod state;
 mod ui;
 

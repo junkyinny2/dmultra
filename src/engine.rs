@@ -279,6 +279,11 @@ pub async fn run(
         .conn_limit
         .clone()
         .unwrap_or_else(|| Arc::new(AtomicU32::new(8)));
+    // MMS fallback: try HTTP/HTTPS, otherwise a clear error is returned
+    // by the normal HTTP path.
+    if rec.url.to_ascii_lowercase().starts_with("mms://") {
+        rec.url = rec.url.replacen("mms://", "http://", 1);
+    }
     // HLS playlists (.m3u8) use a dedicated segment-downloading path
     // (IDM-style video grabbing). The assembled output is a single
     // concatenated file.
@@ -338,6 +343,36 @@ pub async fn run(
                 return (done, Outcome::Cancelled);
             }
             crate::dash::DashOutcome::Failed(msg) => {
+                return (done, Outcome::Failed(msg));
+            }
+        }
+    }
+    if crate::rtsp::is_rtsp_url(&rec.url) {
+        let (done, out) = crate::rtsp::run_rtsp(
+            state.clone(),
+            rec.clone(),
+            limiter.clone(),
+            quota.clone(),
+            cancel,
+            ui.clone(),
+            referer.clone(),
+            auth.clone(),
+        )
+        .await;
+        match out {
+            crate::rtsp::RtspOutcome::Complete { total } => {
+                let _ = total;
+                crate::hooks::notify(&state, crate::hooks::EVENT_COMPLETED, &done).await;
+                let settings = { state.lock().await.settings.clone() };
+                if settings.play_completion_sound {
+                    play_completion_sound(&settings.completion_sound);
+                }
+                return (done, Outcome::Complete { total });
+            }
+            crate::rtsp::RtspOutcome::Cancelled => {
+                return (done, Outcome::Cancelled);
+            }
+            crate::rtsp::RtspOutcome::Failed(msg) => {
                 return (done, Outcome::Failed(msg));
             }
         }
