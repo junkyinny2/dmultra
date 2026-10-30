@@ -19,11 +19,72 @@ use tokio::sync::{watch, Mutex};
 /// (http/https/ftp schemes; MMS/RTMP/HLS are out of scope for this
 /// clone).
 pub fn extract_urls(text: &str) -> Vec<String> {
-    text.split_whitespace()
-        .filter_map(|tok| url::Url::parse(tok).ok())
-        .filter(|u| matches!(u.scheme(), "http" | "https" | "ftp"))
-        .map(|u| u.to_string())
-        .collect()
+    let mut urls = Vec::new();
+    for token in text.split_whitespace() {
+        let token = token.trim_matches(|c: char| {
+            matches!(c, '<' | '>' | '"' | '\'' | ',' | ';' | '.')
+        });
+        let Ok(url) = url::Url::parse(token) else {
+            continue;
+        };
+        if matches!(url.scheme(), "http" | "https" | "ftp") {
+            let value = url.to_string();
+            if !urls.contains(&value) {
+                urls.push(value);
+            }
+        }
+    }
+    urls
+}
+
+pub fn is_download_candidate(url: &str, settings: &crate::state::Settings) -> bool {
+    let Some(parsed) = url::Url::parse(url).ok() else {
+        return false;
+    };
+    if parsed.scheme() == "ftp" {
+        return true;
+    }
+    let mut patterns = crate::filetypes::parse_list(&settings.file_types);
+    patterns.extend(crate::filetypes::parse_list(&settings.clipboard_extensions));
+    crate::filetypes::matches(parsed.path(), &patterns)
+}
+
+pub fn needs_extensionless_probe(url: &str, settings: &crate::state::Settings) -> bool {
+    settings.clipboard_probe
+        && url::Url::parse(url).ok().is_some_and(|parsed| {
+            matches!(parsed.scheme(), "http" | "https")
+                && parsed
+                    .path_segments()
+                    .and_then(|mut segments| segments.next_back())
+                    .is_some_and(|name| !name.is_empty() && !name.contains('.'))
+        })
+}
+
+pub async fn probe_extensionless_url(url: &str) -> Result<bool> {
+    let response = reqwest::Client::new()
+        .head(url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+    let headers = response.headers();
+    let has_filename = headers
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("filename="));
+    let content_type_is_file = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            let value = value.to_ascii_lowercase();
+            value.starts_with("application/")
+                || value.starts_with("audio/")
+                || value.starts_with("image/")
+                || value.starts_with("video/")
+        });
+    Ok(has_filename || content_type_is_file)
 }
 
 fn prompt(question: &str) -> bool {
@@ -132,5 +193,37 @@ mod tests {
         assert_eq!(urls.len(), 2);
         assert!(urls[0].starts_with("https://example.com/file.ZIP"));
         assert!(urls[1].starts_with("ftp://host/dir/setup.exe"));
+    }
+
+    #[test]
+    fn extracts_urls_with_wrapping_punctuation_and_deduplicates() {
+        let urls = extract_urls(
+            "Download <https://example.com/a.zip>, then https://example.com/a.zip.",
+        );
+        assert_eq!(urls, ["https://example.com/a.zip"]);
+    }
+
+    #[test]
+    fn file_type_candidate_uses_general_and_custom_patterns() {
+        let mut settings = crate::state::Settings::default();
+        settings.file_types = "ZIP R0*".into();
+        settings.clipboard_extensions = ".CBZ".into();
+        assert!(is_download_candidate("https://example.test/a.zip?token=1", &settings));
+        assert!(is_download_candidate("https://example.test/a.r03", &settings));
+        assert!(is_download_candidate("https://example.test/a.cbz", &settings));
+        assert!(!is_download_candidate("https://example.test/page.html", &settings));
+        settings.clipboard_probe = true;
+        assert!(!is_download_candidate(
+            "https://example.test/download?id=3",
+            &settings
+        ));
+        assert!(needs_extensionless_probe(
+            "https://example.test/download?id=3",
+            &settings
+        ));
+        assert!(!needs_extensionless_probe(
+            "https://example.test/download/file.zip",
+            &settings
+        ));
     }
 }

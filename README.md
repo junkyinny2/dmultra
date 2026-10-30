@@ -56,6 +56,19 @@ restarts via `state.json`.
 - **RSS** â€” poll feeds and offer enclosures for download
 - **Webhooks** â€” POST notifications on download events
 
+## Browser and clipboard capture
+
+The GUI clipboard watcher can be enabled in Options. It recognizes the
+configured download file types and custom clipboard extensions; the optional
+extensionless-link setting checks candidates with an HTTP HEAD request. The
+watcher continues polling while the GUI is idle and reports clipboard access
+errors in the status bar.
+
+The Chrome/Edge browser extension forwards captured links to DM Ultra through
+the native messaging host. With **Always auto-download browser links** enabled,
+captured links start immediately; otherwise, the separate Add-URL window opens
+with the link and its referer.
+
 ## Build
 
 ```powershell
@@ -102,9 +115,8 @@ folder is migrated automatically.
 
 ## Not implemented
 
-- MMS/RTMP/HLS media protocols, HTTP/2, site grabber, browser
-  integration, kernel network monitors, PAC, dial-up, and cookie-store
-  import.
+- MMS/RTMP/HLS media protocols, HTTP/2, kernel network monitors, PAC,
+  dial-up, and cookie-store import.
 - Scheduler post-actions `hangup`/`shutdown`/`hibernate` are accepted
   in the model but never executed automatically (safety).
 - GUI credentials entered in Add URL are not persisted across

@@ -540,33 +540,42 @@ fn write_overlay_file(msg: &serde_json::Value, action: &str) {
     trace(&format!("host: overlay written ({action})"));
 }
 
-/// Pull the oldest pending browser URL, if any.
 /// Pull the oldest pending browser message. Returns `(urls, referer)`:
 /// `urls` has one entry for single-URL messages or many for batches
 /// ("Grab links" / "Download videos" from the extension).
-pub fn take_pending() -> Option<(Vec<String>, String)> {
+pub fn take_pending() -> Result<Option<(Vec<String>, String)>> {
     let dir = pending_dir();
+    if !dir.exists() {
+        return Ok(None);
+    }
     let mut entries: Vec<_> = std::fs::read_dir(&dir)
-        .ok()?
-        .filter_map(|e| e.ok())
+        .with_context(|| format!("read browser pending directory {}", dir.display()))?
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("enumerate browser pending directory {}", dir.display()))?
+        .into_iter()
         .filter(|e| is_pending_queue_name(&e.file_name().to_string_lossy()))
         .collect();
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let path = e.path();
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            let _ = std::fs::remove_file(&path);
-            continue;
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("read browser request {}", path.display()))?;
+        let v = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(value) => value,
+            Err(error) => {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("remove invalid browser request {}", path.display()))?;
+                crate::logfile::log("BROWSER", &format!("discarded invalid request: {error}"));
+                continue;
+            }
         };
         // Control messages (e.g. video overlay) are handled separately and
         // must never enter the download queue.
         if v.get("action").is_some() {
             continue;
         }
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path)
+            .with_context(|| format!("consume browser request {}", path.display()))?;
         let referer = v
             .get("referer")
             .and_then(|x| x.as_str())
@@ -581,15 +590,15 @@ pub fn take_pending() -> Option<(Vec<String>, String)> {
                 .map(str::to_string)
                 .collect();
             if !urls.is_empty() {
-                return Some((urls, referer));
+                return Ok(Some((urls, referer)));
             }
         }
         let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("");
         if !url.is_empty() {
-            return Some((vec![url.to_string()], referer));
+            return Ok(Some((vec![url.to_string()], referer)));
         }
     }
-    None
+    Ok(None)
 }
 
 #[cfg(windows)]

@@ -7,10 +7,10 @@
 //! - GUI-thread state access uses `manager.lock_ui()` (bounded spin on
 //!   `try_lock_owned`), NEVER tokio's `blocking_lock`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -414,6 +414,7 @@ impl IconCache {
 struct AddUrlDialogState {
     open: bool,
     url: String,
+    referer: Option<String>,
     save_as: String,
     queue: String,
     description: String,
@@ -534,6 +535,12 @@ pub struct DmApp {
     // the clipboard opens the Add-URL window (IDM behaviour).
     last_clip_text: String,
     clip_last_poll: Instant,
+    clip_last_error: String,
+    clip_probe_tx: mpsc::Sender<String>,
+    clip_probe_rx: mpsc::Receiver<String>,
+    browser_last_poll: Instant,
+    browser_pending: VecDeque<(String, String)>,
+    browser_last_error: String,
 
     // Native title-bar theming throttle.
     titlebar_last_apply: Instant,
@@ -545,6 +552,7 @@ pub struct DmApp {
 
 impl DmApp {
     pub fn new(manager: Arc<Manager>) -> Self {
+        let (clip_probe_tx, clip_probe_rx) = mpsc::channel();
         let show_flag = Arc::new(Mutex::new(false));
         let tray_icon = create_tray_icon(show_flag.clone()).ok();
         let (accent, column_widths, column_visible) = {
@@ -617,6 +625,12 @@ impl DmApp {
                     .unwrap_or_default()
             },
             clip_last_poll: Instant::now() - Duration::from_secs(5),
+            clip_last_error: String::new(),
+            clip_probe_tx,
+            clip_probe_rx,
+            browser_last_poll: Instant::now() - Duration::from_secs(5),
+            browser_pending: VecDeque::new(),
+            browser_last_error: String::new(),
             titlebar_last_apply: Instant::now() - Duration::from_secs(5),
             column_widths,
             column_visible,
@@ -639,6 +653,7 @@ impl DmApp {
         self.add_dialog.open = true;
         self.add_dialog.save_as = default_dir.to_string_lossy().to_string();
         self.add_dialog.url.clear();
+        self.add_dialog.referer = None;
         self.add_dialog.description.clear();
         self.add_dialog.queue = default_queue;
         self.add_dialog.connections = connections;
@@ -647,10 +662,11 @@ impl DmApp {
 
     /// Open the Add-URL window prefilled with a URL (clipboard watcher
     /// hook, IDM-style "link copied -> download box").
-    fn open_add_url_with(&mut self, url: String) {
+    fn open_add_url_with(&mut self, url: String, referer: Option<String>) {
         self.open_add_url();
         self.add_dialog.url = url;
-        self.status_bar = "Download link found in the clipboard.".into();
+        self.add_dialog.referer = referer;
+        self.status_bar = "Download link detected.".into();
     }
 
     /// Poll the clipboard at most twice per second. A newly seen
@@ -658,21 +674,109 @@ impl DmApp {
     /// clipboard is not touched while the dialog is already open, and
     /// the launch-time clipboard is seeded so stale links do not pop
     /// the dialog on startup.
-    fn tick_clipboard_watcher(&mut self) {
+    fn tick_clipboard_watcher(&mut self, ctx: &egui::Context, settings: &crate::state::Settings) {
+        if !self.add_dialog.open && settings.clipboard_probe {
+            if let Ok(url) = self.clip_probe_rx.try_recv() {
+                self.open_add_url_with(url, None);
+            }
+        }
         if self.add_dialog.open || self.clip_last_poll.elapsed() < Duration::from_millis(500) {
             return;
         }
         self.clip_last_poll = Instant::now();
-        let text = arboard::Clipboard::new()
-            .and_then(|mut c| c.get_text())
-            .unwrap_or_default();
+        let text = match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+            Ok(text) => {
+                if !self.clip_last_error.is_empty() {
+                    self.clip_last_error.clear();
+                    self.status_bar = "Clipboard monitoring is working again.".into();
+                }
+                text
+            }
+            Err(error) => {
+                let message = format!("Clipboard monitor unavailable: {error}");
+                if self.clip_last_error != message {
+                    self.status_bar = message.clone();
+                    self.clip_last_error = message;
+                }
+                return;
+            }
+        };
         if text.is_empty() || text == self.last_clip_text {
             return;
         }
         self.last_clip_text = text.clone();
-        let urls = crate::clipboard::extract_urls(&text);
-        if let Some(url) = urls.into_iter().next() {
-            self.open_add_url_with(url);
+        for url in crate::clipboard::extract_urls(&text) {
+            if crate::clipboard::is_download_candidate(&url, settings) {
+                self.open_add_url_with(url, None);
+                break;
+            }
+            if crate::clipboard::needs_extensionless_probe(&url, settings) {
+                let sender = self.clip_probe_tx.clone();
+                let repaint = ctx.clone();
+                crate::manager::runtime().spawn(async move {
+                    match crate::clipboard::probe_extensionless_url(&url).await {
+                        Ok(true) => {
+                            let _ = sender.send(url);
+                            repaint.request_repaint();
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            crate::logfile::log(
+                                "CLIPBOARD",
+                                &format!("extensionless link probe failed: {error:#}"),
+                            );
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    fn poll_browser_pending(&mut self, ctx: &egui::Context) {
+        ctx.request_repaint_after(Duration::from_millis(250));
+        if self.browser_last_poll.elapsed() >= Duration::from_millis(250) {
+            self.browser_last_poll = Instant::now();
+            match crate::browser::take_pending() {
+                Ok(Some((urls, referer))) => {
+                    self.browser_last_error.clear();
+                    for url in urls {
+                        self.browser_pending.push_back((url, referer.clone()));
+                    }
+                }
+                Ok(None) => self.browser_last_error.clear(),
+                Err(error) => {
+                    let message = format!("Browser integration could not read queued links: {error:#}");
+                    if self.browser_last_error != message {
+                        self.status_bar = message.clone();
+                        crate::logfile::log("BROWSER", &message);
+                        self.browser_last_error = message;
+                    }
+                }
+            }
+        }
+
+        if self.add_dialog.open {
+            return;
+        }
+        let Some((url, referer)) = self.browser_pending.pop_front() else {
+            return;
+        };
+        let auto_download = self.manager.lock_ui().settings.browser_auto_download;
+        self.open_add_url();
+        self.add_dialog.url = url;
+        self.add_dialog.referer = (!referer.trim().is_empty()).then_some(referer);
+        if auto_download {
+            self.add_dialog.open = false;
+            if !self.create_download(true) {
+                self.add_dialog.open = true;
+                self.status_bar = format!(
+                    "Could not auto-download browser link: {}",
+                    self.add_dialog.error
+                );
+            }
+        } else {
+            self.add_dialog.open = true;
+            self.status_bar = "Browser download link received.".into();
         }
     }
 
@@ -1654,10 +1758,12 @@ impl eframe::App for DmApp {
             }
         }
 
-        // Clipboard watcher: when enabled, copying a link opens the
-        // Add-URL window (IDM behaviour).
+        self.poll_browser_pending(ctx);
+        // Clipboard watcher: when enabled, copying a download link opens
+        // the Add-URL window and remains active while the app is idle.
         if settings_snapshot.monitor_clipboard {
-            self.tick_clipboard_watcher();
+            ctx.request_repaint_after(Duration::from_millis(500));
+            self.tick_clipboard_watcher(ctx, &settings_snapshot);
         } else {
             self.clip_last_poll = Instant::now() - Duration::from_secs(5);
         }
@@ -2899,8 +3005,25 @@ impl DmApp {
         }
 
         if start_now {
-            if let Err(error) = self.manager.start(rec, None, None) {
-                self.status_bar = format!("Added download #{id}; could not start: {error}");
+            if let Err(error) = self
+                .manager
+                .start(rec, None, self.add_dialog.referer.clone())
+            {
+                let message = format!("Added download #{id}; could not start: {error}");
+                self.status_bar = message.clone();
+                self.add_dialog.error = message.clone();
+                let mut st = self.manager.lock_ui();
+                if let Some(download) = st.downloads.iter_mut().find(|download| download.id == id) {
+                    download.status = Status::Failed;
+                    download.last_error = Some(message);
+                }
+                if let Err(save_error) = st.save() {
+                    crate::logfile::log(
+                        "GUI",
+                        &format!("could not persist failed download start: {save_error:#}"),
+                    );
+                }
+                return false;
             } else {
                 self.status_bar = format!("Added and started download #{id}.");
             }

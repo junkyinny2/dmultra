@@ -638,7 +638,7 @@ impl PageId {
                 "Probe extensionless links online",
                 "Custom watched extensions",
                 "Browser integration",
-                "Auto-download links",
+                "Always auto-download browser links",
                 "Keep Awake While Downloading",
                 "Show Status",
                 "Show Queues",
@@ -2105,7 +2105,7 @@ impl SettingsDialog {
                 hit,
                 &[
                     ("Browser integration", "Click download links in Chrome/Edge to open them in DM Ultra (loads a one-time developer-mode extension)."),
-                    ("Auto-download links", "Start downloads from browser link clicks immediately, without showing the File Info dialog."),
+                    ("Always auto-download browser links", "Immediately start browser-captured downloads without showing the File Info dialog."),
                 ],
             ) {
                 section_card(ui, pal, Some(("Browser", None)), |ui, drawn| {
@@ -2131,7 +2131,7 @@ impl SettingsDialog {
                             }
                         }
                     });
-                    srow!(self, ui, pal, first, drawn, hit, "Auto-download links", "Start downloads from browser link clicks immediately, without showing the File Info dialog.", |ui| {
+                    srow!(self, ui, pal, first, drawn, hit, "Always auto-download browser links", "Immediately start browser-captured downloads without showing the File Info dialog.", |ui| {
                         if toggle(ui, pal, &mut self.draft.browser_auto_download).clicked() {
                             self.set_dirty();
                         }
