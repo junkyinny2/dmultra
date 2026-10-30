@@ -1835,7 +1835,33 @@ impl eframe::App for DmApp {
                         self.resume_all();
                     }
 
-                    // Queue controls and Site Grabber are first-class toolbar actions.
+                    // Delete
+                    let icon_del = self.icons.get_or_render(ctx, "delete", SVG_DELETE, text_dim(), 34);
+                    if render_toolbar_button(ui, &icon_del, "Delete", text_dim(), button_w) {
+                        self.delete_selected();
+                    }
+
+                    // Delete All
+                    let icon_del_all = self.icons.get_or_render(ctx, "delete_all", SVG_DELETE_ALL, ACCENT_RED, 34);
+                    if render_toolbar_button(ui, &icon_del_all, "Delete All", ACCENT_RED, button_w) {
+                        self.delete_all();
+                    }
+
+                    toolbar_separator(ui);
+
+                    // Options
+                    let icon_opt = self.icons.get_or_render(ctx, "options", SVG_OPTIONS, text_dim(), 34);
+                    if render_toolbar_button(ui, &icon_opt, "Options", text_dim(), button_w) {
+                        self.open_settings();
+                    }
+
+                    // Scheduler
+                    let icon_sched = self.icons.get_or_render(ctx, "scheduler", SVG_SCHEDULER, text_dim(), 34);
+                    if render_toolbar_button(ui, &icon_sched, "Scheduler", text_dim(), button_w) {
+                        self.open_scheduler();
+                    }
+
+                    // IDM places queue controls and the site grabber after Scheduler.
                     let queue = self.queue_for_toolbar_start();
                     let icon_queue_start = self.icons.get_or_render(
                         ctx,
@@ -1887,32 +1913,6 @@ impl eframe::App for DmApp {
                         button_w,
                     ) {
                         self.open_grabber();
-                    }
-
-                    // Delete
-                    let icon_del = self.icons.get_or_render(ctx, "delete", SVG_DELETE, text_dim(), 34);
-                    if render_toolbar_button(ui, &icon_del, "Delete", text_dim(), button_w) {
-                        self.delete_selected();
-                    }
-
-                    // Delete All
-                    let icon_del_all = self.icons.get_or_render(ctx, "delete_all", SVG_DELETE_ALL, ACCENT_RED, 34);
-                    if render_toolbar_button(ui, &icon_del_all, "Delete All", ACCENT_RED, button_w) {
-                        self.delete_all();
-                    }
-
-                    toolbar_separator(ui);
-
-                    // Options
-                    let icon_opt = self.icons.get_or_render(ctx, "options", SVG_OPTIONS, text_dim(), 34);
-                    if render_toolbar_button(ui, &icon_opt, "Options", text_dim(), button_w) {
-                        self.open_settings();
-                    }
-
-                    // Scheduler
-                    let icon_sched = self.icons.get_or_render(ctx, "scheduler", SVG_SCHEDULER, text_dim(), 34);
-                    if render_toolbar_button(ui, &icon_sched, "Scheduler", text_dim(), button_w) {
-                        self.open_scheduler();
                     }
                 });
 
