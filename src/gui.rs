@@ -245,6 +245,27 @@ fn centered_on_main_pos(
     ))
 }
 
+/// Width/height a native window frame adds around a winit client area
+/// (8 px border each side, 39 px caption). Used to turn an inner size into
+/// the OUTER size `with_position` works in.
+pub const POPOUT_CHROME_W: f32 = 16.0;
+pub const POPOUT_CHROME_H: f32 = 39.0;
+
+/// Screen position (logical points) where a popout opens when it has no
+/// remembered spot of its own: centred over the main window. `outer_size`
+/// includes the native frame (caption + borders).
+pub fn centered_popup_pos(ctx: &egui::Context, outer_size: [f32; 2]) -> Option<egui::Pos2> {
+    #[cfg(target_os = "windows")]
+    {
+        centered_on_main_pos(ctx, outer_size[0], outer_size[1])
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (ctx, outer_size);
+        None
+    }
+}
+
 const COLUMN_LABELS: [&str; 8] = [
     "File Name", "Queue", "Size", "Status", "Time left", "Transfer rate", "Last Try",
     "Description",
@@ -2673,6 +2694,12 @@ impl eframe::App for DmApp {
                     self.status_bar = "Temporary files cleaned.".into();
                 }
             }
+            // Persist the Options window position after the settings above
+            // have been applied, so an OK press cannot overwrite it with the
+            // snapshot the dialog opened with.
+            if let Some(pos) = self.settings_dialog.pending_pos.take() {
+                self.save_position("settings", pos);
+            }
         }
 
         // C. Scheduler Dialog (Separate OS Window)
@@ -2740,7 +2767,7 @@ impl DmApp {
         let mut close_requested = false;
 
         // Compute initial position: prefer saved position, otherwise center on main window.
-        let initial_pos = self.saved_position(ctx, "add-url", [506.0, 380.0]);
+        let initial_pos = self.saved_position(ctx, "add-url", [500.0, 340.0]);
 
         ctx.show_viewport_immediate(
             viewport_id,
@@ -2754,10 +2781,8 @@ impl DmApp {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
                 }
-                // Save window position on move/close
-                if let Some(pos) = ctx.input(|i| i.viewport().outer_rect).map(|r| [r.min.x, r.min.y]) {
-                    self.save_position("add-url", pos);
-                }
+                // Remember the spot only if the user moved it.
+                self.record_popout_move(ctx, "add-url", initial_pos);
                 egui::CentralPanel::default().frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
                     ui.add_enabled_ui(!self.add_dialog.auto_started, |ui| {
                     let heading = if self.add_dialog.auto_started {
@@ -2872,7 +2897,7 @@ impl DmApp {
         let viewport_id = ViewportId::from_hash_of("dm-delete-confirm");
         let mut close_requested = false;
 
-        let initial_pos = self.saved_position(ctx, "delete-confirm", [446.0, 236.0]);
+        let initial_pos = self.saved_position(ctx, "delete-confirm", [440.0, 196.0]);
 
         ctx.show_viewport_immediate(
             viewport_id,
@@ -2886,9 +2911,7 @@ impl DmApp {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
                 }
-                if let Some(pos) = ctx.input(|i| i.viewport().outer_rect).map(|r| [r.min.x, r.min.y]) {
-                    self.save_position("delete-confirm", pos);
-                }
+                self.record_popout_move(ctx, "delete-confirm", initial_pos);
                 egui::CentralPanel::default()
                     .frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(16.0)))
                     .show(ctx, |ui| {
@@ -3093,7 +3116,7 @@ impl DmApp {
     fn show_grabber_viewport(&mut self, ctx: &egui::Context) {
         let viewport_id = ViewportId::from_hash_of("dm-grabber");
         let mut close_requested = false;
-        let initial_pos = self.saved_position(ctx, "site-grabber", [560.0, 500.0]);
+        let initial_pos = self.saved_position(ctx, "site-grabber", [680.0, 540.0]);
 
         ctx.show_viewport_immediate(
             viewport_id,
@@ -3107,9 +3130,7 @@ impl DmApp {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
                 }
-                if let Some(pos) = ctx.input(|i| i.viewport().outer_rect).map(|r| [r.min.x, r.min.y]) {
-                    self.save_position("site-grabber", pos);
-                }
+                self.record_popout_move(ctx, "site-grabber", initial_pos);
 
                 egui::CentralPanel::default()
                     .frame(
@@ -3306,7 +3327,7 @@ impl DmApp {
         let viewport_id = ViewportId::from_hash_of("dm-scheduler");
         let mut close_requested = false;
 
-        let initial_pos = self.saved_position(ctx, "scheduler", [486.0, 470.0]);
+        let initial_pos = self.saved_position(ctx, "scheduler", [480.0, 430.0]);
 
         ctx.show_viewport_immediate(
             viewport_id,
@@ -3320,9 +3341,7 @@ impl DmApp {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
                 }
-                if let Some(pos) = ctx.input(|i| i.viewport().outer_rect).map(|r| [r.min.x, r.min.y]) {
-                    self.save_position("scheduler", pos);
-                }
+                self.record_popout_move(ctx, "scheduler", initial_pos);
                 let queues = {
                     let st = self.manager.lock_ui();
                     st.queues.clone()
@@ -3444,7 +3463,7 @@ impl DmApp {
             let filename = d.save_path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
             let key = format!("dl-progress-{}", id);
-            let initial_pos = self.saved_position(ctx, &key, [506.0, 400.0]);
+            let initial_pos = self.saved_position(ctx, &key, [500.0, 360.0]);
 
             ctx.show_viewport_immediate(
                 viewport_id,
@@ -3458,9 +3477,7 @@ impl DmApp {
                     if ctx.input(|i| i.viewport().close_requested()) {
                         close_requested = true;
                     }
-                    if let Some(pos) = ctx.input(|i| i.viewport().outer_rect).map(|r| [r.min.x, r.min.y]) {
-                        self.save_position(&key, pos);
-                    }
+                    self.record_popout_move(ctx, &key, initial_pos);
                     egui::CentralPanel::default().frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
                         ui.label(RichText::new(&filename).size(15.0).strong().color(text_main()));
                         ui.add(egui::Label::new(RichText::new(&d.url).size(11.0).color(text_dim())).truncate(true));
@@ -3641,33 +3658,79 @@ impl DmApp {
         }
     }
 
-    /// Get saved window position for a dialog, or compute centered position as fallback.
-    fn saved_position(&self, ctx: &egui::Context, key: &str, default_size: [f32; 2]) -> egui::Pos2 {
-        let st = self.manager.lock_ui();
-        if st.settings.remember_window_pos {
-            if let Some(pos) = st.settings.window_positions.get(key) {
-                return egui::pos2(pos[0], pos[1]);
+    /// Open position for a popout: the spot the user last left it in, or -
+    /// when the user has never moved it - centred over the main window.
+    ///
+    /// Only positions the user actually chose are stored (see
+    /// `record_popout_move`), so an auto-centred dialog keeps following the
+    /// main window instead of freezing wherever it happened to be opened
+    /// once.
+    fn saved_position(&self, ctx: &egui::Context, key: &str, inner_size: [f32; 2]) -> egui::Pos2 {
+        let saved = {
+            let st = self.manager.lock_ui();
+            if st.settings.remember_window_pos {
+                st.settings.window_positions.get(key).copied()
+            } else {
+                None
             }
+        };
+        if let Some(pos) = saved {
+            return egui::pos2(pos[0], pos[1]);
         }
-        // Fallback: center on main window
-        #[cfg(target_os = "windows")]
-        {
-            if let Some(pos) = centered_on_main_pos(ctx, default_size[0] + 6.0, default_size[1] + 40.0) {
-                return pos;
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            // On non-Windows, use a reasonable default
-            return egui::pos2(100.0, 100.0);
-        }
-        egui::pos2(100.0, 100.0)
+        // Default: centred over the main window. `with_position` works in
+        // OUTER coordinates, so grow the requested client size by the frame.
+        centered_popup_pos(
+            ctx,
+            [
+                inner_size[0] + POPOUT_CHROME_W,
+                inner_size[1] + POPOUT_CHROME_H,
+            ],
+        )
+        .unwrap_or_else(|| egui::pos2(120.0, 120.0))
     }
 
-    /// Save window position for a dialog.
+    /// Watch a popout for a user move. The position is stored only once the
+    /// window is genuinely away from where it was opened; a window that is
+    /// still where we put it stays "auto-centred" for the next open.
+    fn record_popout_move(
+        &mut self,
+        ctx: &egui::Context,
+        key: &str,
+        open_pos: egui::Pos2,
+    ) {
+        // While the user is still dragging, keep the state file untouched;
+        // the final position is stored once the button is released.
+        if ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        let current = ctx
+            .input(|i| i.viewport().outer_rect)
+            .map(|r| [r.min.x, r.min.y]);
+        if let Some(pos) = current {
+            // A few pixels of slack: DPI rounding and OS placement adjust the
+            // window by a pixel or two without the user having moved it.
+            let moved = (pos[0] - open_pos.x).abs() > 4.0
+                || (pos[1] - open_pos.y).abs() > 4.0;
+            if moved {
+                self.save_position(key, pos);
+            }
+        }
+    }
+
+    /// Persist a popout position (no-op when the stored value is unchanged,
+    /// so dragging does not rewrite the state file on every frame).
     fn save_position(&mut self, key: &str, pos: [f32; 2]) {
         let mut st = self.manager.lock_ui();
-        if st.settings.remember_window_pos {
+        if !st.settings.remember_window_pos {
+            return;
+        }
+        let changed = st
+            .settings
+            .window_positions
+            .get(key)
+            .map(|old| (old[0] - pos[0]).abs() > 0.5 || (old[1] - pos[1]).abs() > 0.5)
+            .unwrap_or(true);
+        if changed {
             st.settings.window_positions.insert(key.to_string(), pos);
             let _ = st.save();
         }

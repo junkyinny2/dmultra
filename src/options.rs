@@ -722,6 +722,9 @@ pub struct SettingsDialog {
     pub draft: Settings,
     /// Last observed outer position of the Settings OS window.
     pub last_pos: Option<[f32; 2]>,
+    /// Position the user moved the window to during this open; the host
+    /// persists it so the window reopens there.
+    pub pending_pos: Option<[f32; 2]>,
     /// Whether the remembered position was applied for this open.
     pos_applied: bool,
     /// Snapshot of settings when the dialog opened (Cancel reverts to this).
@@ -764,6 +767,7 @@ impl Default for SettingsDialog {
             search: String::new(),
             draft: Settings::default(),
             last_pos: None,
+            pending_pos: None,
             pos_applied: false,
             orig: Settings::default(),
             dirty: false,
@@ -817,14 +821,11 @@ impl SettingsDialog {
         self.orig = settings.clone();
         self.draft = settings.clone();
         self.last_pos = if settings.remember_window_pos {
-            settings
-                .window_positions
-                .get("settings")
-                .copied()
-                .or(self.last_pos)
+            settings.window_positions.get("settings").copied()
         } else {
             None
         };
+        self.pending_pos = None;
         self.pos_applied = false;
         self.system_dark = system_dark;
         self.hook_bufs = webhooks
@@ -985,18 +986,32 @@ impl SettingsDialog {
             return;
         }
         let pal = self.palette();
+        // Open where the user last left this window, or - if they never
+        // moved it - centred over the main program window.
+        let open_pos = self
+            .last_pos
+            .map(|p| egui::pos2(p[0], p[1]))
+            .or_else(|| {
+                crate::gui::centered_popup_pos(
+                    ctx,
+                    [
+                        WINDOW_W + crate::gui::POPOUT_CHROME_W,
+                        WINDOW_H + crate::gui::POPOUT_CHROME_H,
+                    ],
+                )
+            });
         let mut builder = egui::ViewportBuilder::default()
             .with_title("Options")
             .with_inner_size([WINDOW_W, WINDOW_H])
             .with_min_inner_size([MIN_W, MIN_H]);
         if !self.pos_applied {
-            if let Some(pos) = self.last_pos {
+            if let Some(pos) = open_pos {
                 builder = builder.with_position(pos);
             }
             self.pos_applied = true;
         }
         let mut keep_open = true;
-        let mut last_pos = self.last_pos;
+        let mut moved_to: Option<[f32; 2]> = None;
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("dm-settings"),
             builder,
@@ -1019,12 +1034,27 @@ impl SettingsDialog {
                             .show(vctx, |ui| self.body(ui, pal));
                     }
                 }
-                last_pos = vctx
-                    .input(|i| i.viewport().outer_rect)
-                    .map(|r| [r.min.x, r.min.y]);
+                // Only a position the user actually moved the window to is
+                // worth remembering; the auto-centred spot follows the main
+                // window instead of being frozen on first open.
+                if let (Some(open), Some(now)) = (
+                    open_pos,
+                    vctx.input(|i| i.viewport().outer_rect)
+                        .map(|r| [r.min.x, r.min.y]),
+                ) {
+                    let dragging = vctx.input(|i| i.pointer.any_down());
+                    if !dragging
+                        && ((now[0] - open.x).abs() > 4.0
+                            || (now[1] - open.y).abs() > 4.0)
+                    {
+                        moved_to = Some(now);
+                    }
+                }
             },
         );
-        self.last_pos = last_pos;
+        if let Some(pos) = moved_to {
+            self.pending_pos = Some(pos);
+        }
         if !keep_open {
             self.open = false;
         }
