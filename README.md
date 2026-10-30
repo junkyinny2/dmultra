@@ -65,9 +65,10 @@ watcher continues polling while the GUI is idle and reports clipboard access
 errors in the status bar.
 
 The Chrome/Edge browser extension forwards captured links to DM Ultra through
-the native messaging host. With **Always auto-download browser links** enabled,
-captured links start immediately; otherwise, the separate Add-URL window opens
-with the link and its referer.
+the native messaging host. With **Start browser downloads immediately (show
+File Info)** enabled, captured links start immediately while the separate
+Add-URL window displays the transfer details; otherwise, that window opens for
+review before starting.
 
 ## Build
 

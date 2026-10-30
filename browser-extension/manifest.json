@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr1BeFI9PhsGMTpTft1kMyZjNzrKYPNATen+DoR7rb3UGJ8HTjGg89w7hzVdWcWXyOaYlmh1xe7cZ7em7X8Uj+rEZoHHt50ElB/hy05r6D8qt40MGdrkWIL800eVkh8d93UeXKFyDqH2D+i7cYDZGItiCz8g7g0dXo04hcly1QW8TocPeF0LiRSkVKYsXmqs0F81+T+TmYyds0Cnn8EJVN9LLb3kjpMaklhd4N9tV9Q79j956/c+ZhxviXwfa6pxTWrB2Yce13OHwhnbREhMoXOXF32246asMMlv/SF42H8wpZ3bd6T6n4C02iulpucpvx4usoLX67f93gWcRRNEwVQIDAQAB",
   "name": "DM Ultra Integration",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Opens download links in DM Ultra",
   "permissions": ["nativeMessaging", "contextMenus", "tabs", "webRequest"],
   "host_permissions": ["<all_urls>"],

@@ -4,6 +4,24 @@
 const EXT_RE = /\.(3gp|7z|aac|ace|aif|apk|arj|asf|avi|bin|bz2|doc|docx|exe|flv|gz|gzip|img|iso|lzh|m4a|m4v|mkv|mov|mp3|mp4|mpa|mpe|mpeg|mpg|msi|msu|ogg|ogv|pdf|plj|pps|ppt|qt|ra|rar|rm|rmvb|sea|sit|sitx|tar|tif|tiff|wav|webm|wma|wmv|z|zip|r0\d?|r1\d?)(\?|#|$)/i;
 const MEDIA_RE = /\.(m3u8|mpd|mp4|webm|mkv|flv|mp3|m4a|ts|mpg|mpeg|wmv|wav|ogg|aac|opus|mov|avi)(\?|#|$)/i;
 
+function isDownloadLink(anchor, url) {
+  if (anchor.hasAttribute('download')) return true;
+  const name = (anchor.getAttribute('download') || '').trim();
+  if (EXT_RE.test(name)) return true;
+  try {
+    const parsed = new URL(url);
+    if (!/^https?:$/.test(parsed.protocol)) return false;
+    let path = parsed.pathname;
+    try { path = decodeURIComponent(path); } catch (_) {}
+    if (EXT_RE.test(path)) return true;
+    for (const key of ['filename', 'fileName', 'downloadName']) {
+      const value = parsed.searchParams.get(key);
+      if (value && EXT_RE.test(value)) return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
 function forward(url, filename) {
   try { chrome.runtime.sendMessage({ url, referer: location.href, filename: filename || '' }); } catch(e) {}
 }
@@ -13,14 +31,21 @@ function forwardBatch(urls) {
 
 // Click interception for downloadable links.
 document.addEventListener('click', (e) => {
-  if (e.defaultPrevented || e.button !== 0) return;
+  if (e.button !== 0) return;
   if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
-  const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+  const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+  let a = path.find((node) =>
+    node && node.localName === 'a' && (node.href || node.getAttribute('href'))
+  );
+  if (!a) {
+    const target = e.target && e.target.nodeType === 1 ? e.target : e.target && e.target.parentElement;
+    a = target && target.closest ? target.closest('a[href]') : null;
+  }
   if (!a) return;
   const url = a.href || '';
   if (!/^https?:/i.test(url)) return;
-  const name = (a.download || '').trim();
-  if (a.hasAttribute('download') || EXT_RE.test(url) || EXT_RE.test(name)) {
+  const name = (a.getAttribute('download') || '').trim();
+  if (isDownloadLink(a, url)) {
     e.preventDefault(); e.stopPropagation();
     forward(url, name);
   }

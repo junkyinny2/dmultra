@@ -413,6 +413,7 @@ impl IconCache {
 #[derive(Default)]
 struct AddUrlDialogState {
     open: bool,
+    auto_started: bool,
     url: String,
     referer: Option<String>,
     save_as: String,
@@ -651,6 +652,7 @@ impl DmApp {
             )
         };
         self.add_dialog.open = true;
+        self.add_dialog.auto_started = false;
         self.add_dialog.save_as = default_dir.to_string_lossy().to_string();
         self.add_dialog.url.clear();
         self.add_dialog.referer = None;
@@ -766,9 +768,10 @@ impl DmApp {
         self.add_dialog.url = url;
         self.add_dialog.referer = (!referer.trim().is_empty()).then_some(referer);
         if auto_download {
-            self.add_dialog.open = false;
-            if !self.create_download(true) {
-                self.add_dialog.open = true;
+            if self.create_download(true) {
+                self.add_dialog.auto_started = true;
+                self.status_bar = "Browser download started; File Info is displayed.".into();
+            } else {
                 self.status_bar = format!(
                     "Could not auto-download browser link: {}",
                     self.add_dialog.error
@@ -2716,7 +2719,13 @@ impl DmApp {
                     self.save_position("add-url", pos);
                 }
                 egui::CentralPanel::default().frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
-                    ui.label(RichText::new("Enter new address to download").size(14.0).strong().color(text_main()));
+                    ui.add_enabled_ui(!self.add_dialog.auto_started, |ui| {
+                    let heading = if self.add_dialog.auto_started {
+                        "Download File Info"
+                    } else {
+                        "Enter new address to download"
+                    };
+                    ui.label(RichText::new(heading).size(14.0).strong().color(text_main()));
                     ui.add_space(8.0);
 
                     // URL row
@@ -2781,24 +2790,32 @@ impl DmApp {
                         ui.add_space(6.0);
                         ui.label(RichText::new(&self.add_dialog.error).size(11.5).color(status_failed()));
                     }
+                    });
                     ui.add_space(12.0);
 
-                    // Action buttons
-                    ui.horizontal(|ui| {
-                        if ui.button(RichText::new("  OK (Download Now)  ").color(text_main())).clicked() {
-                            if self.create_download(true) {
-                                self.add_dialog.open = false;
-                            }
-                        }
-                        if ui.button(RichText::new(" Download Later ").color(text_dim())).clicked() {
-                            if self.create_download(false) {
-                                self.add_dialog.open = false;
-                            }
-                        }
-                        if ui.button(RichText::new(" Cancel ").color(text_dim())).clicked() {
+                    if self.add_dialog.auto_started {
+                        ui.label(RichText::new("Download started automatically. The displayed file information was used.").size(11.5).color(text_dim()));
+                        if ui.button(RichText::new("  Close  ").color(text_main())).clicked() {
                             self.add_dialog.open = false;
                         }
-                    });
+                    } else {
+                        // Action buttons
+                        ui.horizontal(|ui| {
+                            if ui.button(RichText::new("  OK (Download Now)  ").color(text_main())).clicked() {
+                                if self.create_download(true) {
+                                    self.add_dialog.open = false;
+                                }
+                            }
+                            if ui.button(RichText::new(" Download Later ").color(text_dim())).clicked() {
+                                if self.create_download(false) {
+                                    self.add_dialog.open = false;
+                                }
+                            }
+                            if ui.button(RichText::new(" Cancel ").color(text_dim())).clicked() {
+                                self.add_dialog.open = false;
+                            }
+                        });
+                    }
                 });
             },
         );
