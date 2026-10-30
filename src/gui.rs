@@ -1860,6 +1860,41 @@ impl eframe::App for DmApp {
                             let save_dir = self.manager.lock_ui().settings.save_path.clone();
                             let _ = std::process::Command::new("explorer").arg(save_dir).spawn();
                         }
+                        ui.separator();
+                        if ui.button("Export Download List...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_file_name("downloads.json")
+                                .save_file()
+                            {
+                                let st = self.manager.lock_ui();
+                                let data = serde_json::to_string_pretty(&st.downloads).unwrap_or_default();
+                                drop(st);
+                                let _ = std::fs::write(&path, data);
+                                self.status_bar = format!("Exported download list to {}.", path.display());
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("Import Download List...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                if let Ok(data) = std::fs::read_to_string(&path) {
+                                    if let Ok(list) = serde_json::from_str::<Vec<crate::state::DownloadRec>>(&data) {
+                                        let mut st = self.manager.lock_ui();
+                                        let mut imported = 0usize;
+                                        for mut rec in list {
+                                            rec.id = st.next_id();
+                                            rec.status = crate::state::Status::Paused;
+                                            st.downloads.push(rec);
+                                            imported += 1;
+                                        }
+                                        let _ = st.save();
+                                        self.status_bar = format!("Imported {imported} download(s).");
+                                    } else {
+                                        self.status_bar = "Could not parse download list.".into();
+                                    }
+                                }
+                            }
+                            ui.close_menu();
+                        }
                     });
 
                     ui.menu_button(RichText::new("Downloads").color(text_main()), |ui| {
@@ -3006,6 +3041,21 @@ impl DmApp {
 
     fn create_download(&mut self, start_now: bool) -> bool {
         self.add_dialog.error.clear();
+        let url_str0 = self.add_dialog.url.trim().to_string();
+        if url_str0.contains('[') || url_str0.contains('{') {
+            let urls = crate::batch::expand_urls(&url_str0);
+            if urls.len() > 1 {
+                let mut all_ok = true;
+                for u in urls {
+                    self.add_dialog.url = u;
+                    if !self.create_download(start_now) {
+                        all_ok = false;
+                    }
+                }
+                self.add_dialog.url = url_str0;
+                return all_ok;
+            }
+        }
         let mut url_str = self.add_dialog.url.trim().to_string();
         if url_str.is_empty() {
             self.add_dialog.error = "Enter a URL to download.".into();
