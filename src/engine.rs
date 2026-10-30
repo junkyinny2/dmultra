@@ -312,6 +312,36 @@ pub async fn run(
             }
         }
     }
+    if crate::dash::is_dash_url(&rec.url) {
+        let (done, out) = crate::dash::run_dash(
+            state.clone(),
+            rec.clone(),
+            limiter.clone(),
+            quota.clone(),
+            cancel,
+            ui.clone(),
+            referer.clone(),
+            auth.clone(),
+        )
+        .await;
+        match out {
+            crate::dash::DashOutcome::Complete { total } => {
+                let _ = total;
+                crate::hooks::notify(&state, crate::hooks::EVENT_COMPLETED, &done).await;
+                let settings = { state.lock().await.settings.clone() };
+                if settings.play_completion_sound {
+                    play_completion_sound(&settings.completion_sound);
+                }
+                return (done, Outcome::Complete { total });
+            }
+            crate::dash::DashOutcome::Cancelled => {
+                return (done, Outcome::Cancelled);
+            }
+            crate::dash::DashOutcome::Failed(msg) => {
+                return (done, Outcome::Failed(msg));
+            }
+        }
+    }
     let settings = { state.lock().await.settings.clone() };
     let mut restarted_once = false;
     let mut single_conn = false;

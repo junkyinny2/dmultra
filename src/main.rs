@@ -9,6 +9,7 @@
 mod batch;
 mod browser;
 mod clipboard;
+mod dash;
 mod engine;
 mod filetypes;
 mod ftp;
