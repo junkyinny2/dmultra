@@ -326,6 +326,12 @@ pub struct Settings {
     pub show_sidebar_category: bool,
     /// Proxy mode: `none` | `system` | `manual`.
     pub proxy_mode: String,
+    /// PAC (proxy auto-config) URL, used when proxy mode is `pac`.
+    #[serde(default)]
+    pub pac_url: String,
+    /// Import proxy settings from Internet Explorer / system.
+    #[serde(default)]
+    pub proxy_from_ie: bool,
     /// Manual proxy scheme: `http` | `https` | `socks4` | `socks5`.
     pub proxy_type: String,
     /// Bypass list (comma separated hosts) for manual proxy mode.
@@ -500,6 +506,8 @@ impl Default for Settings {
             show_sidebar_queues: true,
             show_sidebar_category: true,
             proxy_mode: "none".into(),
+            pac_url: String::new(),
+            proxy_from_ie: false,
             proxy_type: "http".into(),
             proxy_no_list: String::new(),
             auto_proxy_rules: Vec::new(),

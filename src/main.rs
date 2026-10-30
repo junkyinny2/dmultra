@@ -15,6 +15,7 @@ mod filetypes;
 mod ftp;
 mod grabber;
 mod hls;
+mod i18n;
 mod gui;
 mod hooks;
 mod http;
@@ -411,6 +412,7 @@ fn main() -> Result<()> {
     }
     attach_parent_console();
     let cli = Cli::parse();
+    crate::i18n::init("en");
 
     // One process-wide runtime: the CLI blocks on it; the GUI spawns
     // engine tasks onto it from the event thread.

@@ -2604,6 +2604,27 @@ impl SettingsDialog {
                 });
             }
 
+            let hit = self.section_hit("Video", None);
+            if self.rows_hit(
+                hit,
+                &[("FFmpeg path", "Optional path to a user-supplied FFmpeg executable.")],
+            ) {
+                section_card(ui, pal, Some(("Video", None)), |ui, drawn| {
+                    let mut first = true;
+                    srow!(self, ui, pal, first, drawn, hit, "FFmpeg path", "Optional path to a user-supplied FFmpeg executable (never bundled).", |ui| {
+                        if text_input(ui, pal, &mut self.draft.ffmpeg_path, 260.0, "C:\\ffmpeg\\bin\\ffmpeg.exe").changed() {
+                            self.set_dirty();
+                        }
+                        if button(ui, pal, "Browse\u{2026}", Btn::Secondary).clicked() {
+                            if let Some(p) = rfd::FileDialog::new().pick_file() {
+                                self.draft.ffmpeg_path = p.display().to_string();
+                                self.set_dirty();
+                            }
+                        }
+                    });
+                });
+            }
+
             let hit = self.section_hit("Refresh Address", None);
             if self.rows_hit(
                 hit,
@@ -2847,6 +2868,29 @@ impl SettingsDialog {
                     });
                 });
             }
+            let hit = self.section_hit("PAC / System", None);
+            if self.rows_hit(
+                hit,
+                &[
+                    ("PAC URL", "Proxy auto-config URL."),
+                    ("Import from IE / system", "Read proxy settings from the system."),
+                ],
+            ) {
+                section_card(ui, pal, Some(("PAC / System", None)), |ui, drawn| {
+                    let mut first = true;
+                    srow!(self, ui, pal, first, drawn, hit, "PAC URL", "Proxy auto-config URL.", |ui| {
+                        if text_input(ui, pal, &mut self.draft.pac_url, 260.0, "http://.../proxy.pac").changed() {
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Import from IE / system", "Read proxy settings from the system.", |ui| {
+                        if toggle(ui, pal, &mut self.draft.proxy_from_ie).clicked() {
+                            self.set_dirty();
+                        }
+                    });
+                });
+            }
+
             let hit = self.section_hit("Bypass", None);
             if self.rows_hit(hit, &[("Bypass List", "Hosts that never use the proxy (comma separated).")]) {
                 section_card(ui, pal, Some(("Bypass", None)), |ui, drawn| {
