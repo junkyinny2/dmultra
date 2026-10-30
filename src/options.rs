@@ -1044,10 +1044,8 @@ self.num.insert("refresh-secs", self.draft.refresh_address_secs.to_string());
                     vctx.input(|i| i.viewport().outer_rect)
                         .map(|r| [r.min.x, r.min.y]),
                 ) {
-                    let dragging = vctx.input(|i| i.pointer.any_down());
-                    if !dragging
-                        && ((now[0] - open.x).abs() > 4.0
-                            || (now[1] - open.y).abs() > 4.0)
+                    if (now[0] - open.x).abs() > 4.0
+                        || (now[1] - open.y).abs() > 4.0
                     {
                         moved_to = Some(now);
                     }

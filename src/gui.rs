@@ -3784,11 +3784,8 @@ impl DmApp {
         key: &str,
         open_pos: egui::Pos2,
     ) {
-        // While the user is still dragging, keep the state file untouched;
-        // the final position is stored once the button is released.
-        if ctx.input(|i| i.pointer.any_down()) {
-            return;
-        }
+        // Store whenever the window has genuinely moved away from where it
+        // was opened. Saving mid-drag is harmless: the last frame wins.
         let current = ctx
             .input(|i| i.viewport().outer_rect)
             .map(|r| [r.min.x, r.min.y]);
