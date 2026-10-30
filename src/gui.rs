@@ -62,9 +62,10 @@ mod native_win {
     use std::sync::Mutex;
 
     /// Titles of our own OS windows that must follow the app theme.
-    pub const OUR_TITLES_EXACT: [&str; 5] = [
+    pub const OUR_TITLES_EXACT: [&str; 6] = [
         "DM Ultra",
         "Add new download...",
+        "Confirm Delete",
         "Scheduler",
         "Options",
         "Site Grabber",
@@ -75,8 +76,17 @@ mod native_win {
         text == "DM Ultra" || text.starts_with("DM Ultra v")
     }
 
-    /// Dark title bar message ids (DWMWA_USE_IMMERSIVE_DARK_MODE).
+    /// Window-chrome attributes understood by DWM. The colour ones need
+    /// Windows 11 22000+; older builds simply ignore those calls.
     const DWMWA_USE_IMMERSIVE_DARK_MODE: c_int = 20;
+    const DWMWA_BORDER_COLOR: c_int = 34;
+    const DWMWA_CAPTION_COLOR: c_int = 35;
+    const DWMWA_TEXT_COLOR: c_int = 36;
+
+    /// DWM wants colours as 0x00BBGGRR (`COLORREF`).
+    fn colorref(c: [u8; 3]) -> u32 {
+        (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16)
+    }
 
     #[repr(C)]
     #[derive(Default, Clone, Copy)]
@@ -145,25 +155,48 @@ mod native_win {
         }
     }
 
-    /// Apply dark/light immersive title-bar mode to every window we own.
-    /// Idempotent and cheap; call it whenever the palette changes (and
-    /// periodically, so popouts opened since the last change are included).
-    pub fn apply_titlebar_theme(dark: bool) {
+    /// Paint every window we own with the app's theme colours: dark/light
+    /// immersive mode plus an explicit caption/border/text colour, so the
+    /// title bar matches the app chrome instead of DWM's plain black.
+    /// Cheap enough to call every frame: DWM ignores attributes whose value
+    /// has not changed, and enumerating our own windows is a few syscalls.
+    /// Calling it every frame means a popout created during this frame is
+    /// themed before it is ever composited with the default title bar.
+    pub fn apply_titlebar_theme(
+        dark: bool,
+        caption: [u8; 3],
+        text: [u8; 3],
+        border: [u8; 3],
+    ) {
         enumerate();
-        let val: i32 = if dark { 1 } else { 0 };
+        let mut windows: Vec<isize> = Vec::new();
         if let Ok(list) = COLLECTED.lock() {
-            for (hwnd, text) in list.iter() {
-                if !is_ours(text) {
-                    continue;
+            for (hwnd, title) in list.iter() {
+                if is_ours(title) {
+                    windows.push(*hwnd);
                 }
-                unsafe {
-                    DwmSetWindowAttribute(
-                        *hwnd,
-                        DWMWA_USE_IMMERSIVE_DARK_MODE,
-                        &val,
-                        std::mem::size_of::<i32>() as u32,
-                    );
-                }
+            }
+        }
+        if windows.is_empty() {
+            return;
+        }
+
+        let immersive: i32 = if dark { 1 } else { 0 };
+        let caption_ref = colorref(caption) as i32;
+        let text_ref = colorref(text) as i32;
+        let border_ref = colorref(border) as i32;
+        let int_size = std::mem::size_of::<i32>() as u32;
+        for hwnd in windows {
+            unsafe {
+                DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    &immersive,
+                    int_size,
+                );
+                DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption_ref, int_size);
+                DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text_ref, int_size);
+                DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border_ref, int_size);
             }
         }
     }
@@ -543,9 +576,6 @@ pub struct DmApp {
     browser_pending: VecDeque<(String, String)>,
     browser_last_error: String,
 
-    // Native title-bar theming throttle.
-    titlebar_last_apply: Instant,
-
     // Resizable/reorderable download-list columns
     column_widths: Vec<f32>,
     column_visible: Vec<bool>,
@@ -632,7 +662,6 @@ impl DmApp {
             browser_last_poll: Instant::now() - Duration::from_secs(5),
             browser_pending: VecDeque::new(),
             browser_last_error: String::new(),
-            titlebar_last_apply: Instant::now() - Duration::from_secs(5),
             column_widths,
             column_visible,
         }
@@ -1749,18 +1778,6 @@ impl eframe::App for DmApp {
         // Apply styling to egui context
         apply_app_style(ctx);
 
-        // Native title bars (main window + popout windows) follow the
-        // dark-mode theme. Re-applied at 1 Hz so popouts opened since
-        // the last pass are themed too.
-        let dark = options::Appearance::from_settings(&settings_snapshot, system_dark).is_dark();
-        if self.titlebar_last_apply.elapsed() > Duration::from_secs(1) {
-            self.titlebar_last_apply = Instant::now();
-            #[cfg(target_os = "windows")]
-            {
-                native_win::apply_titlebar_theme(dark);
-            }
-        }
-
         self.poll_browser_pending(ctx);
         // Clipboard watcher: when enabled, copying a download link opens
         // the Add-URL window and remains active while the app is idle.
@@ -2678,6 +2695,29 @@ impl eframe::App for DmApp {
         // E. In-app overlays that are not download flows.
         self.render_search_popup(ctx);
         self.show_about(ctx);
+
+        // Native window chrome (title bar, border, caption text) follows the
+        // app theme. Done last so a popout created during THIS frame is
+        // themed before it is composited - otherwise the OS shows its
+        // default title bar (white, or plain black in dark mode) until the
+        // next themed pass.
+        #[cfg(target_os = "windows")]
+        {
+            native_win::apply_titlebar_theme(
+                palette.dark,
+                [
+                    palette.background.r(),
+                    palette.background.g(),
+                    palette.background.b(),
+                ],
+                [palette.text.r(), palette.text.g(), palette.text.b()],
+                [
+                    palette.border.r(),
+                    palette.border.g(),
+                    palette.border.b(),
+                ],
+            );
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
