@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -61,7 +62,13 @@ mod native_win {
     use std::sync::Mutex;
 
     /// Titles of our own OS windows that must follow the app theme.
-    pub const OUR_TITLES_EXACT: [&str; 4] = ["DM Ultra", "Add new download...", "Scheduler", "Options"];
+    pub const OUR_TITLES_EXACT: [&str; 5] = [
+        "DM Ultra",
+        "Add new download...",
+        "Scheduler",
+        "Options",
+        "Site Grabber",
+    ];
     pub const OUR_TITLES_PREFIX: &str = "Download status - ";
 
     fn is_main_title(text: &str) -> bool {
@@ -250,6 +257,8 @@ const SVG_DELETE: &[u8] = include_bytes!("../assets/icons/delete.svg");
 const SVG_DELETE_ALL: &[u8] = include_bytes!("../assets/icons/delete-all.svg");
 const SVG_OPTIONS: &[u8] = include_bytes!("../assets/icons/settings.svg");
 const SVG_SCHEDULER: &[u8] = include_bytes!("../assets/icons/clock.svg");
+const SVG_SITE_GRABBER: &[u8] = include_bytes!("../assets/icons/globe.svg");
+const SVG_STOP: &[u8] = include_bytes!("../assets/icons/x-circle.svg");
 
 const SVG_FOLDER: &[u8] = include_bytes!("../assets/icons/folder.svg");
 const SVG_PROGRESS: &[u8] = include_bytes!("../assets/icons/activity.svg");
@@ -435,6 +444,44 @@ struct DeleteConfirmState {
     from_disk: bool,
 }
 
+struct GrabberDialogState {
+    open: bool,
+    start_url: String,
+    depth: u32,
+    same_origin: bool,
+    file_types: String,
+    queue: String,
+    running: bool,
+    pages_crawled: Arc<AtomicU64>,
+    result: Arc<Mutex<Option<std::result::Result<crate::grabber::CrawlResult, String>>>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    links: Vec<String>,
+    selected: HashSet<String>,
+    error: String,
+    report: String,
+}
+
+impl Default for GrabberDialogState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            start_url: String::new(),
+            depth: 2,
+            same_origin: true,
+            file_types: crate::filetypes::DEFAULT_FILE_TYPES.to_string(),
+            queue: MAIN_QUEUE.to_string(),
+            running: false,
+            pages_crawled: Arc::new(AtomicU64::new(0)),
+            result: Arc::new(Mutex::new(None)),
+            task: None,
+            links: Vec::new(),
+            selected: HashSet::new(),
+            error: String::new(),
+            report: String::new(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main Application State
 // ---------------------------------------------------------------------------
@@ -457,6 +504,7 @@ pub struct DmApp {
     add_dialog: AddUrlDialogState,
     settings_dialog: SettingsDialog,
     scheduler_dialog: SchedulerDialogState,
+    grabber_dialog: GrabberDialogState,
     active_details_popouts: Vec<u64>, // IDs of open progress popout viewports
     about_open: bool,
     delete_confirm: DeleteConfirmState,
@@ -542,6 +590,7 @@ impl DmApp {
                 on_finish: "none".into(),
                 ..Default::default()
             },
+            grabber_dialog: GrabberDialogState::default(),
             active_details_popouts: Vec::new(),
             about_open: false,
             delete_confirm: DeleteConfirmState::default(),
@@ -628,12 +677,21 @@ impl DmApp {
     }
 
     fn open_settings(&mut self) {
-        let (settings, webhooks) = {
+        let (settings, webhooks, site_logins) = {
             let st = self.manager.lock_ui();
-            (st.settings.clone(), st.webhooks.clone())
+            (
+                st.settings.clone(),
+                st.webhooks.clone(),
+                st.site_logins.clone(),
+            )
         };
         self.settings_dialog
-            .open_with(&settings, options::system_prefers_dark(), webhooks);
+            .open_with(
+                &settings,
+                options::system_prefers_dark(),
+                webhooks,
+                site_logins,
+            );
     }
 
     fn open_scheduler(&mut self) {
@@ -916,15 +974,32 @@ impl DmApp {
         }
     }
 
-    fn start_queue_manual(&mut self) {
+    fn start_queue_manual(&mut self, queue: &str) {
         if self.manager.queue_running() {
             self.status_bar = "Queue processing is already running.".into();
             return;
         }
-        self.scheduler_suppressed.remove(MAIN_QUEUE);
-        self.active_queue = Some(MAIN_QUEUE.to_string());
-        self.manager.start_queue(MAIN_QUEUE.to_string());
-        self.status_bar = format!("Started queue \"{MAIN_QUEUE}\".");
+        self.scheduler_suppressed.remove(queue);
+        self.active_queue = Some(queue.to_string());
+        self.manager.start_queue(queue.to_string());
+        self.status_bar = format!("Started queue \"{queue}\".");
+    }
+
+    fn queue_for_toolbar_start(&self) -> String {
+        let st = self.manager.lock_ui();
+        self.selected_download_id
+            .and_then(|id| {
+                st.downloads
+                    .iter()
+                    .find(|download| download.id == id)
+                    .and_then(|download| download.queue.clone())
+            })
+            .filter(|queue| !queue.trim().is_empty())
+            .or_else(|| {
+                let queue = st.settings.default_queue.trim();
+                (!queue.is_empty()).then(|| queue.to_string())
+            })
+            .unwrap_or_else(|| MAIN_QUEUE.to_string())
     }
 
     fn stop_queue_manual(&mut self) {
@@ -932,11 +1007,184 @@ impl DmApp {
             self.status_bar = "Queue processing is not running.".into();
             return;
         }
+        let queue = self
+            .active_queue
+            .clone()
+            .unwrap_or_else(|| MAIN_QUEUE.to_string());
         self.manager.queue_stop();
-        self.scheduler_suppressed.insert(MAIN_QUEUE.to_string());
-        self.scheduler_started.remove(MAIN_QUEUE);
+        self.scheduler_suppressed.insert(queue.clone());
+        self.scheduler_started.remove(&queue);
         self.active_queue = None;
-        self.status_bar = format!("Stopped queue \"{MAIN_QUEUE}\".");
+        self.status_bar = format!("Stopped queue \"{queue}\".");
+    }
+
+    fn open_grabber(&mut self) {
+        let st = self.manager.lock_ui();
+        let default_queue = if st.settings.default_queue.trim().is_empty() {
+            MAIN_QUEUE.to_string()
+        } else {
+            st.settings.default_queue.clone()
+        };
+        self.grabber_dialog.file_types = crate::grabber::default_types(&st);
+        self.grabber_dialog.queue = default_queue;
+        self.grabber_dialog.error.clear();
+        self.grabber_dialog.report.clear();
+        self.grabber_dialog.open = true;
+    }
+
+    fn start_grabber(&mut self) {
+        if self.grabber_dialog.running {
+            return;
+        }
+        let start = self.grabber_dialog.start_url.trim().to_string();
+        match url::Url::parse(&start) {
+            Ok(url) if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() => {}
+            _ => {
+                self.grabber_dialog.error =
+                    "Enter a valid HTTP or HTTPS start address.".to_string();
+                return;
+            }
+        }
+
+        self.grabber_dialog.links.clear();
+        self.grabber_dialog.selected.clear();
+        self.grabber_dialog.error.clear();
+        self.grabber_dialog.report.clear();
+        self.grabber_dialog.pages_crawled.store(0, Ordering::Relaxed);
+        if let Ok(mut result) = self.grabber_dialog.result.lock() {
+            *result = None;
+        } else {
+            self.grabber_dialog.error =
+                "Could not initialize the Site Grabber result state.".to_string();
+            return;
+        }
+
+        let result = Arc::clone(&self.grabber_dialog.result);
+        let pages_crawled = Arc::clone(&self.grabber_dialog.pages_crawled);
+        let depth = self.grabber_dialog.depth.min(20);
+        let same_origin = self.grabber_dialog.same_origin;
+        let file_types = self.grabber_dialog.file_types.clone();
+        let user_agent = self.manager.lock_ui().settings.user_agent.clone();
+        self.grabber_dialog.running = true;
+        self.grabber_dialog.task = Some(crate::manager::runtime().spawn(async move {
+            let outcome = crate::grabber::crawl(
+                &start,
+                depth,
+                same_origin,
+                &file_types,
+                &user_agent,
+                pages_crawled,
+            )
+            .await
+            .map_err(|error| format!("{error:#}"));
+            if let Ok(mut slot) = result.lock() {
+                *slot = Some(outcome);
+            }
+        }));
+    }
+
+    fn poll_grabber(&mut self) {
+        if !self.grabber_dialog.running
+            || !self.grabber_dialog.task.as_ref().is_some_and(|task| task.is_finished())
+        {
+            return;
+        }
+        self.grabber_dialog.task = None;
+        self.grabber_dialog.running = false;
+        let outcome = self
+            .grabber_dialog
+            .result
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        match outcome {
+            Some(Ok(result)) => {
+                let count = result.links.len();
+                let failures = result.failed_pages.len();
+                let failure_details = result
+                    .failed_pages
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.grabber_dialog.links = result.links;
+                self.grabber_dialog.report = if failures == 0 {
+                    format!(
+                        "Found {count} matching file(s) across {} page(s).",
+                        result.pages_crawled
+                    )
+                } else {
+                    format!(
+                        "Found {count} matching file(s); {} of {} page(s) could not be read.\n{}",
+                        failures, result.pages_crawled, failure_details
+                    )
+                };
+                if failures > 0 {
+                    crate::logfile::log(
+                        "GRAB",
+                        &format!(
+                            "Site Grabber encountered {failures} page errors: {failure_details}"
+                        ),
+                    );
+                }
+            }
+            Some(Err(error)) => self.grabber_dialog.error = error,
+            None => self.grabber_dialog.error =
+                "Site Grabber stopped without returning a result.".to_string(),
+        }
+    }
+
+    fn cancel_grabber(&mut self) {
+        if let Some(task) = self.grabber_dialog.task.take() {
+            task.abort();
+            self.grabber_dialog.running = false;
+            self.grabber_dialog.report = "Crawl canceled.".to_string();
+        }
+    }
+
+    fn add_grabber_selected(&mut self) {
+        let selected: Vec<String> = self.grabber_dialog.selected.iter().cloned().collect();
+        if selected.is_empty() {
+            self.grabber_dialog.report = "Select at least one result to add.".to_string();
+            return;
+        }
+        let queue = if self.grabber_dialog.queue.trim().is_empty() {
+            MAIN_QUEUE.to_string()
+        } else {
+            self.grabber_dialog.queue.trim().to_string()
+        };
+        let mut st = self.manager.lock_ui();
+        let old_max_id = st.max_id;
+        let old_download_count = st.downloads.len();
+        let queue_was_present = st.queues.iter().any(|name| name == &queue);
+        if !queue_was_present {
+            st.queues.push(queue.clone());
+        }
+        let mut added = 0;
+        let mut skipped = 0;
+        for url in selected {
+            if st.downloads.iter().any(|download| download.url == url) {
+                skipped += 1;
+                continue;
+            }
+            let mut download = crate::new_rec(&mut st, &url, None, Some(&queue));
+            download.description = "Added by Site Grabber".to_string();
+            st.downloads.push(download);
+            added += 1;
+        }
+        if let Err(error) = st.save() {
+            st.downloads.truncate(old_download_count);
+            st.max_id = old_max_id;
+            if !queue_was_present {
+                st.queues.retain(|name| name != &queue);
+            }
+            self.grabber_dialog.error = format!("Could not save grabbed links: {error}");
+            return;
+        }
+        self.grabber_dialog.report = format!(
+            "Added {added} download(s) to \"{queue}\"; skipped {skipped} duplicate(s)."
+        );
     }
 
     fn queued_count_for(&self, queue: &str) -> usize {
@@ -1007,6 +1255,11 @@ impl DmApp {
     /// schedule window is open and stop it once the window closes. A manual
     /// Stop suppresses the schedule until the next window transition.
     fn scheduler_tick(&mut self) {
+        if !self.manager.queue_running() {
+            if let Some(queue) = self.active_queue.take() {
+                self.scheduler_started.remove(&queue);
+            }
+        }
         if self.scheduler_last_tick.elapsed() < Duration::from_secs(1) {
             return;
         }
@@ -1372,6 +1625,9 @@ impl eframe::App for DmApp {
         if self.manager.active_count() > 0 {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+        if self.grabber_dialog.running {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
 
         // Resolve the active appearance from settings and publish it for the
         // dynamic color helpers used throughout the main window.
@@ -1421,11 +1677,30 @@ impl eframe::App for DmApp {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 egui::menu::bar(ui, |ui| {
                     ui.menu_button(RichText::new("Tasks").color(text_main()), |ui| {
-                        if ui.button("Start Queue Processing").clicked() {
-                            self.start_queue_manual();
-                        }
-                        if ui.button("Stop Queue Processing").clicked() {
+                        ui.menu_button("Start Queue Processing", |ui| {
+                            let mut queues = self.manager.lock_ui().queues.clone();
+                            if !queues.iter().any(|name| name == MAIN_QUEUE) {
+                                queues.push(MAIN_QUEUE.to_string());
+                            }
+                            for queue in queues {
+                                if ui.button(&queue).clicked() {
+                                    self.start_queue_manual(&queue);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        if ui
+                            .add_enabled(
+                                self.manager.queue_running(),
+                                egui::Button::new("Stop Queue Processing"),
+                            )
+                            .clicked()
+                        {
                             self.stop_queue_manual();
+                        }
+                        ui.separator();
+                        if ui.button("Site Grabber...").clicked() {
+                            self.open_grabber();
                         }
                         ui.separator();
                         if ui.button("Exit").clicked() {
@@ -1520,9 +1795,9 @@ impl eframe::App for DmApp {
                     .inner_margin(Margin::symmetric(6.0, 0.0)),
             )
             .show(ctx, |ui| {
-                // Nine command buttons share one compact left-aligned row,
+                // Twelve command buttons share one compact left-aligned row,
                 // split into command groups by two hairline separators.
-                let button_w = ((ui.available_width() - 32.0) / 9.0).clamp(64.0, 72.0);
+                let button_w = ((ui.available_width() - 28.0) / 12.0).clamp(56.0, 72.0);
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
 
                 ui.horizontal_centered(|ui| {
@@ -1549,7 +1824,7 @@ impl eframe::App for DmApp {
                     }
 
                     // Stop All
-                    let icon_stop = self.icons.get_or_render(ctx, "stop", SVG_STOP_ALL, text_dim(), 34);
+                    let icon_stop = self.icons.get_or_render(ctx, "stop", SVG_STOP, text_dim(), 34);
                     if render_toolbar_button(ui, &icon_stop, "Stop All", text_dim(), button_w) {
                         self.stop_all();
                     }
@@ -1558,6 +1833,60 @@ impl eframe::App for DmApp {
                     let icon_resume = self.icons.get_or_render(ctx, "resume", SVG_RESUME_ALL, ACCENT_GREEN, 34);
                     if render_toolbar_button(ui, &icon_resume, "Resume All", ACCENT_GREEN, button_w) {
                         self.resume_all();
+                    }
+
+                    // Queue controls and Site Grabber are first-class toolbar actions.
+                    let queue = self.queue_for_toolbar_start();
+                    let icon_queue_start = self.icons.get_or_render(
+                        ctx,
+                        "queue_start",
+                        SVG_RESUME_ALL,
+                        ACCENT_GREEN,
+                        34,
+                    );
+                    if render_toolbar_button(
+                        ui,
+                        &icon_queue_start,
+                        "Start Queue",
+                        ACCENT_GREEN,
+                        button_w,
+                    ) {
+                        self.start_queue_manual(&queue);
+                    }
+
+                    let icon_queue_stop = self.icons.get_or_render(
+                        ctx,
+                        "queue_stop",
+                        SVG_STOP_ALL,
+                        text_dim(),
+                        34,
+                    );
+                    if render_toolbar_button_enabled(
+                        ui,
+                        &icon_queue_stop,
+                        "Stop Queue",
+                        text_dim(),
+                        button_w,
+                        self.manager.queue_running(),
+                    ) {
+                        self.stop_queue_manual();
+                    }
+
+                    let icon_grabber = self.icons.get_or_render(
+                        ctx,
+                        "site_grabber",
+                        SVG_SITE_GRABBER,
+                        text_dim(),
+                        34,
+                    );
+                    if render_toolbar_button(
+                        ui,
+                        &icon_grabber,
+                        "Site Grabber",
+                        text_dim(),
+                        button_w,
+                    ) {
+                        self.open_grabber();
                     }
 
                     // Delete
@@ -2171,6 +2500,9 @@ impl eframe::App for DmApp {
                 self.accent = ui_accent(&new_settings.accent);
                 self.column_widths = column_widths_from_settings(&new_settings);
                 self.column_visible = column_visible_from_settings(&new_settings);
+                self.manager
+                    .quota
+                    .update_config(new_settings.quota.clone());
                 let mut st = self.manager.lock_ui();
                 st.settings = new_settings;
                 let _ = st.save();
@@ -2180,6 +2512,16 @@ impl eframe::App for DmApp {
                 let mut st = self.manager.lock_ui();
                 st.webhooks = webhooks;
                 let _ = st.save();
+            }
+            if let Some(site_logins) = outcome.site_logins {
+                let mut st = self.manager.lock_ui();
+                let previous = std::mem::replace(&mut st.site_logins, site_logins);
+                if let Err(error) = st.save() {
+                    st.site_logins = previous;
+                    self.status_bar = format!("Could not save Site Logins: {error}");
+                } else {
+                    self.status_bar = "Site Logins saved.".into();
+                }
             }
             if outcome.open_log_dir {
                 let dir = crate::state::state_dir().join("logs");
@@ -2210,6 +2552,12 @@ impl eframe::App for DmApp {
         // C. Scheduler Dialog (Separate OS Window)
         if self.scheduler_dialog.open {
             self.show_scheduler_viewport(ctx);
+        }
+
+        // C2. Site Grabber is a separate OS window because it creates downloads.
+        self.poll_grabber();
+        if self.grabber_dialog.open {
+            self.show_grabber_viewport(ctx);
         }
 
         // D. Download Progress Popout Windows (Separate OS Windows)
@@ -2560,6 +2908,218 @@ impl DmApp {
             self.status_bar = format!("Queued download #{id}.");
         }
         true
+    }
+
+    fn show_grabber_viewport(&mut self, ctx: &egui::Context) {
+        let viewport_id = ViewportId::from_hash_of("dm-grabber");
+        let mut close_requested = false;
+        let initial_pos = self.saved_position(ctx, "site-grabber", [560.0, 500.0]);
+
+        ctx.show_viewport_immediate(
+            viewport_id,
+            ViewportBuilder::default()
+                .with_title("Site Grabber")
+                .with_inner_size([680.0, 540.0])
+                .with_min_inner_size([540.0, 400.0])
+                .with_always_on_top()
+                .with_position(initial_pos),
+            |ctx, _class| {
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    close_requested = true;
+                }
+                if let Some(pos) = ctx.input(|i| i.viewport().outer_rect).map(|r| [r.min.x, r.min.y]) {
+                    self.save_position("site-grabber", pos);
+                }
+
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::none()
+                            .fill(bg_panel())
+                            .inner_margin(Margin::same(14.0)),
+                    )
+                    .show(ctx, |ui| {
+                        ui.label(
+                            RichText::new("Collect downloadable links from a website")
+                                .size(14.0)
+                                .strong()
+                                .color(text_main()),
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Start address:").color(text_dim()));
+                            ui.add_sized(
+                                Vec2::new(ui.available_width(), 24.0),
+                                egui::TextEdit::singleline(&mut self.grabber_dialog.start_url)
+                                    .hint_text("https://example.com/downloads/"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Depth:").color(text_dim()));
+                            ui.add(
+                                egui::DragValue::new(&mut self.grabber_dialog.depth)
+                                    .clamp_range(0..=20),
+                            );
+                            ui.checkbox(
+                                &mut self.grabber_dialog.same_origin,
+                                "Stay on this site",
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("File types:").color(text_dim()));
+                            ui.add_sized(
+                                Vec2::new(ui.available_width(), 24.0),
+                                egui::TextEdit::singleline(&mut self.grabber_dialog.file_types)
+                                    .hint_text("ZIP EXE R0*"),
+                            );
+                        });
+
+                        let queues = {
+                            let st = self.manager.lock_ui();
+                            st.queues.clone()
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Add results to queue:").color(text_dim()));
+                            egui::ComboBox::from_id_source("grabber_queue")
+                                .width(230.0)
+                                .selected_text(self.grabber_dialog.queue.as_str())
+                                .show_ui(ui, |ui| {
+                                    for name in &queues {
+                                        ui.selectable_value(
+                                            &mut self.grabber_dialog.queue,
+                                            name.clone(),
+                                            name,
+                                        );
+                                    }
+                                    if !queues.iter().any(|name| name == MAIN_QUEUE) {
+                                        ui.selectable_value(
+                                            &mut self.grabber_dialog.queue,
+                                            MAIN_QUEUE.to_string(),
+                                            MAIN_QUEUE,
+                                        );
+                                    }
+                                });
+                        });
+
+                        if self.grabber_dialog.running {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Crawled {} page(s)...",
+                                    self.grabber_dialog.pages_crawled.load(Ordering::Relaxed)
+                                ))
+                                .size(11.5)
+                                .color(text_dim()),
+                            );
+                        }
+                        if !self.grabber_dialog.error.is_empty() {
+                            ui.label(
+                                RichText::new(&self.grabber_dialog.error)
+                                    .size(11.5)
+                                    .color(status_failed()),
+                            );
+                        }
+                        if !self.grabber_dialog.report.is_empty() {
+                            ui.label(
+                                RichText::new(&self.grabber_dialog.report)
+                                    .size(11.5)
+                                    .color(text_dim()),
+                            );
+                        }
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!(
+                                "Results: {} link(s)",
+                                self.grabber_dialog.links.len()
+                            ))
+                            .strong()
+                            .color(text_main()),
+                        );
+                        egui::ScrollArea::vertical()
+                            .id_source("grabber-results")
+                            .max_height(300.0)
+                            .show(ui, |ui| {
+                                for link in self.grabber_dialog.links.clone() {
+                                    ui.horizontal(|ui| {
+                                        let mut selected =
+                                            self.grabber_dialog.selected.contains(&link);
+                                        if ui.checkbox(&mut selected, "").changed() {
+                                            if selected {
+                                                self.grabber_dialog
+                                                    .selected
+                                                    .insert(link.clone());
+                                            } else {
+                                                self.grabber_dialog.selected.remove(&link);
+                                            }
+                                        }
+                                        ui.add_sized(
+                                            Vec2::new(
+                                                ui.available_width().max(0.0),
+                                                20.0,
+                                            ),
+                                            egui::Label::new(
+                                                RichText::new(&link)
+                                                    .size(11.0)
+                                                    .color(text_dim()),
+                                            )
+                                            .truncate(true),
+                                        );
+                                    });
+                                }
+                            });
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if self.grabber_dialog.running {
+                                if ui.button("Cancel Crawl").clicked() {
+                                    self.cancel_grabber();
+                                }
+                            } else if ui.button("Start Crawl").clicked() {
+                                self.start_grabber();
+                            }
+                            if ui
+                                .add_enabled(
+                                    !self.grabber_dialog.running
+                                        && !self.grabber_dialog.links.is_empty(),
+                                    egui::Button::new("Select All"),
+                                )
+                                .clicked()
+                            {
+                                self.grabber_dialog.selected =
+                                    self.grabber_dialog.links.iter().cloned().collect();
+                            }
+                            if ui
+                                .add_enabled(
+                                    !self.grabber_dialog.running
+                                        && !self.grabber_dialog.selected.is_empty(),
+                                    egui::Button::new("Clear Selection"),
+                                )
+                                .clicked()
+                            {
+                                self.grabber_dialog.selected.clear();
+                            }
+                            if ui
+                                .add_enabled(
+                                    !self.grabber_dialog.running
+                                        && !self.grabber_dialog.selected.is_empty(),
+                                    egui::Button::new("Add Selected to Queue"),
+                                )
+                                .clicked()
+                            {
+                                self.add_grabber_selected();
+                            }
+                            if ui.button("Close").clicked() {
+                                close_requested = true;
+                            }
+                        });
+                    });
+            },
+        );
+
+        if close_requested {
+            self.cancel_grabber();
+            self.grabber_dialog.open = false;
+        }
     }
 
     fn show_scheduler_viewport(&mut self, ctx: &egui::Context) {
@@ -3036,9 +3596,21 @@ fn render_toolbar_button(
     text_color: Color32,
     width: f32,
 ) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 62.0), Sense::click());
+    render_toolbar_button_enabled(ui, icon, label, text_color, width, true)
+}
 
-    if response.hovered() {
+fn render_toolbar_button_enabled(
+    ui: &mut Ui,
+    icon: &egui::TextureHandle,
+    label: &str,
+    text_color: Color32,
+    width: f32,
+    enabled: bool,
+) -> bool {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 62.0), sense);
+
+    if enabled && response.hovered() {
         ui.painter().rect_filled(rect.shrink(2.0), Rounding::same(4.0), bg_row_hover());
     }
 
@@ -3047,18 +3619,19 @@ fn render_toolbar_button(
         pos2(rect.center().x, rect.top() + 22.0),
         Vec2::splat(34.0),
     );
+    let icon_tint = if enabled { Color32::WHITE } else { text_dim() };
     ui.painter().image(
         icon.id(),
         icon_rect,
         Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-        Color32::WHITE,
+        icon_tint,
     );
     ui.painter().text(
         pos2(rect.center().x, rect.bottom() - 12.0),
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional(11.0),
-        text_color,
+        FontId::proportional(if width < 60.0 { 9.0 } else { 11.0 }),
+        if enabled { text_color } else { text_dim() },
     );
 
     response

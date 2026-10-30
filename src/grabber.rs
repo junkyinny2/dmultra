@@ -1,241 +1,261 @@
-//! Site Grabber (IDM "grabber"): crawl a starting page up to a depth,
-//! collect every downloadable link found (file-type filtered), and hand
-//! them to the batch window. Same-origin restriction by default.
+//! Site Grabber: crawl a starting page and collect file-type-matched URLs.
 
-use crate::state::State;
-use anyhow::Result;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use anyhow::{bail, Result};
+use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use url::Url;
 
-/// Crawl `start` up to `depth` page hops; push downloadable links into
-/// `found`. `done` flips when finished (or errored).
-#[allow(clippy::too_many_arguments)]
+const MAX_PAGES: usize = 200;
+const MAX_LINKS: usize = 2_000;
+
+#[derive(Debug, Default)]
+pub struct CrawlResult {
+    pub links: Vec<String>,
+    pub pages_crawled: usize,
+    pub failed_pages: Vec<String>,
+}
+
 pub async fn crawl(
     start: &str,
     depth: u32,
     same_origin: bool,
     file_types: &str,
     user_agent: &str,
-    found: Arc<Mutex<Vec<String>>>,
-    progress: Arc<AtomicU64>,
     pages_crawled: Arc<AtomicU64>,
-    done: Arc<AtomicBool>,
-) -> Result<()> {
-    let base = url::Url::parse(start)?;
-    let host = base.host_str().unwrap_or("").to_string();
-    let types: Vec<String> = file_types
-        .split_whitespace()
-        .map(|t| t.trim_start_matches('.').to_lowercase())
-        .filter(|t| !t.is_empty())
-        .collect();
-    let mut queue: Vec<(url::Url, u32)> = vec![(base.clone(), 0)];
-    let mut seen_pages: Vec<String> = Vec::new();
-    let mut link_seen: Vec<String> = Vec::new();
-    const MAX_PAGES: usize = 200;
-    const MAX_LINKS: usize = 2000;
+) -> Result<CrawlResult> {
+    let base = Url::parse(start)?;
+    if !matches!(base.scheme(), "http" | "https") || base.host_str().is_none() {
+        bail!("Start address must be an HTTP or HTTPS URL.");
+    }
 
+    let patterns = crate::filetypes::parse_list(file_types);
+    let mut pending = VecDeque::from([(base.clone(), 0)]);
+    let mut seen_pages = HashSet::new();
+    let mut seen_links = HashSet::new();
+    let mut result = CrawlResult::default();
     let client = reqwest::Client::builder()
         .user_agent(user_agent)
         .timeout(std::time::Duration::from_secs(20))
         .build()?;
 
-    while !queue.is_empty() {
-        let (page, level) = queue.remove(0);
+    while let Some((page, level)) = pending.pop_front() {
         if seen_pages.len() >= MAX_PAGES {
             break;
         }
-        let page_s = page.to_string();
-        if seen_pages.contains(&page_s) {
+        if !seen_pages.insert(page.to_string()) {
             continue;
         }
-        seen_pages.push(page_s.clone());
-        pages_crawled.store(seen_pages.len() as u64, Ordering::Relaxed);
-        progress.store(seen_pages.len() as u64, Ordering::Relaxed);
+        result.pages_crawled = seen_pages.len();
+        pages_crawled.store(result.pages_crawled as u64, Ordering::Relaxed);
 
-        let body = match client.get(page.clone()).send().await {
-            Ok(r) => match r.text().await {
-                Ok(t) => t,
-                Err(_) => continue,
-            },
-            Err(_) => continue,
+        let response = match client.get(page.clone()).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                result.failed_pages.push(format!("{page}: {error}"));
+                continue;
+            }
+        };
+        let response = match response.error_for_status() {
+            Ok(response) => response,
+            Err(error) => {
+                result.failed_pages.push(format!("{page}: {error}"));
+                continue;
+            }
+        };
+        let resolved_page = response.url().clone();
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                result
+                    .failed_pages
+                    .push(format!("{resolved_page}: {error}"));
+                continue;
+            }
         };
 
-        for link in extract_links(&body, &page) {
-            let ls = link.to_string();
-            if same_origin && link.host_str().unwrap_or("") != host {
+        for link in extract_links(&body, &resolved_page) {
+            if !matches!(link.scheme(), "http" | "https")
+                || (same_origin && link.origin() != base.origin())
+            {
                 continue;
             }
-            // Filter out javascript:, mailto:, etc.
-            if !matches!(link.scheme(), "http" | "https") {
-                continue;
-            }
-            if is_downloadable(&ls, &types) {
-                if !link_seen.contains(&ls) {
-                    link_seen.push(ls.clone());
-                    found.lock().await.push(ls);
-                    if link_seen.len() >= MAX_LINKS {
-                        done.store(true, Ordering::Relaxed);
-                        return Ok(());
+            let link_text = link.to_string();
+            if crate::filetypes::matches(link.path(), &patterns) {
+                if seen_links.insert(link_text.clone()) {
+                    result.links.push(link_text);
+                    if result.links.len() >= MAX_LINKS {
+                        return Ok(result);
                     }
                 }
-            } else if level < depth && looks_like_page(&ls) {
-                if !seen_pages.contains(&ls) {
-                    queue.push((link, level + 1));
-                }
+            } else if level < depth && looks_like_page(&link_text) {
+                pending.push_back((link, level + 1));
             }
         }
     }
-    done.store(true, Ordering::Relaxed);
-    Ok(())
+    Ok(result)
 }
 
-/// Extract absolute URLs from `href="..."` and `src="..."` attributes.
-/// Scans for the attribute names specifically (not any quoted string).
-fn extract_links(body: &str, base: &url::Url) -> Vec<url::Url> {
+fn extract_links(body: &str, base: &Url) -> Vec<Url> {
     let mut out = Vec::new();
-    let lower = body.to_lowercase();
+    let lower = body.to_ascii_lowercase();
     let bytes = body.as_bytes();
     let lower_bytes = lower.as_bytes();
-    // Scan for href= / src= / data-src= attributes
     let attrs: [&[u8]; 3] = [b"href=", b"src=", b"data-src="];
-    let mut positions: Vec<usize> = Vec::new();
-    for attr in &attrs {
-        let attr_lower = attr.to_ascii_lowercase();
+    let mut positions = Vec::new();
+    for attr in attrs {
         let mut i = 0;
-        while i + attr_lower.len() <= lower_bytes.len() {
-            if &lower_bytes[i..i + attr_lower.len()] == attr_lower.as_slice() {
+        while i + attr.len() <= lower_bytes.len() {
+            if &lower_bytes[i..i + attr.len()] == attr {
                 positions.push(i);
-                i += attr_lower.len();
+                i += attr.len();
             } else {
                 i += 1;
             }
         }
     }
-    positions.sort();
+    positions.sort_unstable();
     positions.dedup();
     for pos in positions {
-        // Skip past the attribute name and any whitespace
-        let mut j = pos;
-        // Find the = sign
-        while j < bytes.len() && bytes[j] != b'=' {
-            j += 1;
+        let mut value_start = pos;
+        while value_start < bytes.len() && bytes[value_start] != b'=' {
+            value_start += 1;
         }
-        j += 1; // past =
-        while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n') {
-            j += 1;
+        value_start += 1;
+        while value_start < bytes.len()
+            && matches!(bytes[value_start], b' ' | b'\t' | b'\n' | b'\r')
+        {
+            value_start += 1;
         }
-        // Expect quote
-        let quote = if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
-            bytes[j]
-        } else {
-            continue;
-        };
-        j += 1;
-        let start = j;
-        while j < bytes.len() && bytes[j] != quote {
-            j += 1;
-        }
-        if j >= bytes.len() {
+        if value_start >= bytes.len() || !matches!(bytes[value_start], b'"' | b'\'') {
             continue;
         }
-        let candidate = &body[start..j];
-        let cand = candidate.trim();
-        if cand.is_empty() || cand.starts_with('#') || cand.starts_with("javascript:") {
+        let quote = bytes[value_start];
+        value_start += 1;
+        let mut value_end = value_start;
+        while value_end < bytes.len() && bytes[value_end] != quote {
+            value_end += 1;
+        }
+        if value_end == bytes.len() {
             continue;
         }
-        if cand.starts_with("http://") || cand.starts_with("https://") {
-            if let Ok(u) = url::Url::parse(cand) {
-                out.push(u);
-            }
-        } else if let Ok(u) = base.join(cand) {
-            out.push(u);
+        let value = body[value_start..value_end].trim();
+        if value.is_empty() || value.starts_with('#') {
+            continue;
+        }
+        if let Ok(url) = base.join(value) {
+            out.push(url);
         }
     }
     out
 }
 
-fn is_downloadable(link: &str, types: &[String]) -> bool {
-    let path = link.split('#').next().unwrap_or("");
-    let lower = path.split('?').next().unwrap_or("").to_lowercase();
-    let name = lower.rsplit('/').next().unwrap_or("");
-    let ext = name.rsplit('.').next().unwrap_or("");
-    name.contains('.') && types.iter().any(|t| t == ext)
-}
-
-/// True when the URL looks like a browsable page (not a file download,
-/// not an image, not a media asset).
 fn looks_like_page(link: &str) -> bool {
-    let lower = link
+    let path = link
         .split(['#', '?'])
         .next()
         .unwrap_or("")
         .trim_end_matches('/')
-        .to_lowercase();
-    if lower.is_empty() {
-        return false;
-    }
-    // Directory-style URLs (no extension) are pages.
-    let last_seg = lower.rsplit('/').next().unwrap_or("");
-    if !last_seg.contains('.') {
+        .to_ascii_lowercase();
+    let last_segment = path.rsplit('/').next().unwrap_or("");
+    if !last_segment.contains('.') {
         return true;
     }
-    let ext = last_seg.rsplit('.').next().unwrap_or("");
     matches!(
-        ext,
-        "" | "html" | "htm" | "xhtml" | "php" | "asp" | "aspx" | "jsp" | "py" | "rb"
-            | "cgi" | "cfm" | "do" | "action" | "com" | "net" | "org" | "io" | "us"
-            | "uk" | "de" | "fr" | "ru" | "jp" | "cn" | "info" | "edu" | "gov" | "mil"
-            | "int" | "eu" | "au" | "ca" | "br" | "in" | "nl" | "se" | "no" | "fi"
-            | "dk" | "it" | "es" | "pt" | "ch" | "at" | "be" | "pl" | "cz" | "mx"
+        last_segment.rsplit('.').next().unwrap_or(""),
+        "html"
+            | "htm"
+            | "xhtml"
+            | "php"
+            | "asp"
+            | "aspx"
+            | "jsp"
+            | "py"
+            | "rb"
+            | "cgi"
+            | "cfm"
+            | "do"
+            | "action"
     )
 }
 
-/// Default file types for the grabber (mirrors the settings default).
-pub fn default_types(st: &State) -> String {
+pub fn default_types(st: &crate::state::State) -> String {
     if st.settings.file_types.trim().is_empty() {
-        "3gp 7z aac ace aif apk arj asf avi bin bz2 exe gz gzip img iso lzh m4a m4v mkv mov mp3 mp4 mpa mpe mpeg mpg msi msu ogg ogv pdf plj pps ppt qt ra rar rm rmvb sea sit sitx tar tif tiff wav wma wmv z zip".to_string()
+        crate::filetypes::DEFAULT_FILE_TYPES.to_string()
     } else {
         st.settings.file_types.clone()
     }
 }
-/// Fire-and-forget crawl from the GUI thread.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_crawl(
-    start: String,
-    depth: u32,
-    same_origin: bool,
-    types: String,
-    ua: String,
-    found: Arc<Mutex<Vec<String>>>,
-    finished: Arc<AtomicBool>,
-) {
-    let _ = crate::manager::runtime().spawn(async move {
-        let progress = Arc::new(AtomicU64::new(0));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn resolves_quoted_links_and_filters_extensions() {
+        let base = Url::parse("https://example.test/downloads/index.html").unwrap();
+        let links = extract_links(
+            r#"<a href="../5GB.zip">x</a><img src='/image.png'><a href='movie.R03?x=1'>y</a>"#,
+            &base,
+        );
+        let patterns = crate::filetypes::parse_list("ZIP R0*");
+        let files: Vec<_> = links
+            .iter()
+            .filter(|url| crate::filetypes::matches(url.path(), &patterns))
+            .map(Url::as_str)
+            .collect();
+        assert_eq!(
+            files,
+            [
+                "https://example.test/5GB.zip",
+                "https://example.test/downloads/movie.R03?x=1"
+            ]
+        );
+    }
+
+    #[test]
+    fn identifies_crawlable_pages_without_treating_files_as_pages() {
+        assert!(looks_like_page("https://example.test/path/"));
+        assert!(looks_like_page("https://example.test/index.php?id=1"));
+        assert!(!looks_like_page("https://example.test/archive.zip"));
+    }
+
+    #[tokio::test]
+    async fn crawl_collects_matching_links_and_respects_origin() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request);
+            let body = r#"<a href="/files/5GB.zip">download</a><a href="https://elsewhere.test/other.zip">external</a>"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
         let pages = Arc::new(AtomicU64::new(0));
-        found.lock().await.clear();
-        finished.store(false, Ordering::Relaxed);
-        // Share the page counter so the dialog can show live progress.
-        // The pages counter is already an Arc; the caller's dialog shares
-        // it via the AtomicU64 field on GrabDialog (set externally).
-        match crawl(
-            &start,
-            depth,
-            same_origin,
-            &types,
-            &ua,
-            found.clone(),
-            progress,
+        let result = crawl(
+            &format!("http://{address}/"),
+            1,
+            true,
+            "ZIP",
+            "DM Ultra test",
             pages.clone(),
-            finished.clone(),
         )
         .await
-        {
-            Ok(()) => {}
-            Err(e) => {
-                crate::logfile::log("GRAB", &format!("crawl failed: {e:#}"));
-            }
-        }
-        finished.store(true, Ordering::Relaxed);
-    });
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(result.links, [format!("http://{address}/files/5GB.zip")]);
+        assert_eq!(result.pages_crawled, 1);
+        assert_eq!(pages.load(Ordering::Relaxed), 1);
+        assert!(result.failed_pages.is_empty());
+    }
 }

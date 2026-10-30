@@ -1,4 +1,4 @@
-//! VoltDown-style Settings dialog (12 categories) for the DM Ultra GUI.
+//! Settings dialog for the DM Ultra GUI.
 //!
 //! Structure mirrors the GPUI Settings window in `voltdown/crates/settings`
 //! (sidebar navigation, fixed page heading, scrollable section cards,
@@ -7,7 +7,7 @@
 //! that have no engine support in this clone are rendered disabled with an
 //! explicit note.
 
-use crate::state::{Settings, Webhook};
+use crate::state::{Settings, SiteLogin, Webhook};
 use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Rounding, Stroke, Ui};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -580,6 +580,8 @@ pub enum PageId {
     General,
     Appearance,
     Download,
+    FileTypes,
+    SiteLogins,
     Proxy,
     Notify,
     Doctor,
@@ -587,10 +589,12 @@ pub enum PageId {
 }
 
 impl PageId {
-    pub const ALL: [PageId; 7] = [
+    pub const ALL: [PageId; 9] = [
         PageId::General,
         PageId::Appearance,
         PageId::Download,
+        PageId::FileTypes,
+        PageId::SiteLogins,
         PageId::Proxy,
         PageId::Notify,
         PageId::Doctor,
@@ -602,6 +606,8 @@ impl PageId {
             PageId::General => "General",
             PageId::Appearance => "Appearance",
             PageId::Download => "Download",
+            PageId::FileTypes => "File Types",
+            PageId::SiteLogins => "Site Logins",
             PageId::Proxy => "Proxy",
             PageId::Notify => "Notifications",
             PageId::Doctor => "Doctor",
@@ -614,6 +620,8 @@ impl PageId {
             PageId::General => "Basic behavior settings",
             PageId::Appearance => "Theme & Colors",
             PageId::Download => "Download engine settings",
+            PageId::FileTypes => "Extensions recognized by browser capture and Site Grabber",
+            PageId::SiteLogins => "Credentials applied to matching download hosts",
             PageId::Proxy => "Network proxy settings",
             PageId::Notify => "System notifications and download windows",
             PageId::Doctor => "Environment self-check & one-click repair",
@@ -655,9 +663,13 @@ impl PageId {
                 "Save each category to its own folder",
                 "Default Queue",
                 "Thread Count",
+                "User Agent",
                 "Download Limit",
+                "Download Quota",
                 "Resume unfinished downloads on startup",
             ],
+            PageId::FileTypes => &["File Types", "Extension patterns", "Wildcards"],
+            PageId::SiteLogins => &["Site Login", "Host pattern", "Username", "Password"],
             PageId::Proxy => &[
                 "Proxy Mode",
                 "Proxy Type",
@@ -670,6 +682,8 @@ impl PageId {
             ],
             PageId::Notify => &[
                 "Completion Notifications",
+                "Play completion sound",
+                "Test Notification",
                 "Show download progress window",
                 "Show download complete window",
             ],
@@ -718,6 +732,9 @@ pub struct SettingsDialog {
     pub open_log_dir: bool,
     pub system_dark: bool,
     pub webhooks: Vec<Webhook>,
+    site_logins: Vec<SiteLogin>,
+    orig_site_logins: Vec<SiteLogin>,
+    site_logins_dirty: bool,
     hook_bufs: Vec<String>,
     hooks_dirty: bool,
     notice: Option<(String, Instant)>,
@@ -755,6 +772,9 @@ impl Default for SettingsDialog {
             open_log_dir: false,
             system_dark: false,
             webhooks: Vec::new(),
+            site_logins: Vec::new(),
+            orig_site_logins: Vec::new(),
+            site_logins_dirty: false,
             hook_bufs: Vec::new(),
             hooks_dirty: false,
             notice: None,
@@ -783,6 +803,7 @@ pub struct Outcome {
     pub open_data_dir: bool,
     pub open_log_dir: bool,
     pub webhooks: Option<Vec<Webhook>>,
+    pub site_logins: Option<Vec<SiteLogin>>,
 }
 
 impl SettingsDialog {
@@ -791,6 +812,7 @@ impl SettingsDialog {
         settings: &Settings,
         system_dark: bool,
         webhooks: Vec<Webhook>,
+        site_logins: Vec<SiteLogin>,
     ) {
         self.orig = settings.clone();
         self.draft = settings.clone();
@@ -810,6 +832,9 @@ impl SettingsDialog {
             .map(|h| h.events.join(", "))
             .collect();
         self.webhooks = webhooks;
+        self.site_logins = site_logins.clone();
+        self.orig_site_logins = site_logins;
+        self.site_logins_dirty = false;
         self.hooks_dirty = false;
         self.dirty = false;
         self.clean_temp = false;
@@ -837,7 +862,20 @@ impl SettingsDialog {
         } else {
             None
         };
-        Outcome { settings, clean_temp, open_data_dir, open_log_dir, webhooks }
+        let site_logins = if self.site_logins_dirty {
+            self.site_logins_dirty = false;
+            Some(self.site_logins.clone())
+        } else {
+            None
+        };
+        Outcome {
+            settings,
+            clean_temp,
+            open_data_dir,
+            open_log_dir,
+            webhooks,
+            site_logins,
+        }
     }
 
     /// Smoke-test hook: simulate an edited dialog that has been closed.
@@ -1065,6 +1103,8 @@ impl SettingsDialog {
                     if ui.button("Cancel").clicked() {
                         self.draft = self.orig.clone();
                         self.sync_buffers();
+                        self.site_logins = self.orig_site_logins.clone();
+                        self.site_logins_dirty = false;
                         self.set_dirty(); // persist the revert
                         self.open = false;
                     }
@@ -1142,6 +1182,8 @@ impl SettingsDialog {
                     PageId::Download => {
                         split_cols(ui, wide, |ui, col| self.page_download(ui, pal, col))
                     }
+                    PageId::FileTypes => self.page_file_types(ui, pal),
+                    PageId::SiteLogins => self.page_site_logins(ui, pal),
                     PageId::Proxy => {
                         split_cols(ui, wide, |ui, col| self.page_proxy(ui, pal, col))
                     }
@@ -2446,11 +2488,49 @@ impl SettingsDialog {
                     });
                 });
             }
+            let hit = self.section_hit("Quota", None);
+            if self.rows_hit(
+                hit,
+                &[
+                    ("Download Quota", "Pause downloads after the configured amount is transferred during the daily time window."),
+                    ("Quota Amount", "Maximum megabytes downloaded in the quota window."),
+                    ("Quota Start", "Start hour for the quota window."),
+                    ("Quota End", "End hour for the quota window."),
+                ],
+            ) {
+                section_card(ui, pal, Some(("Download Quota", None)), |ui, drawn| {
+                    let mut first = true;
+                    srow!(self, ui, pal, first, drawn, hit, "Download Quota", "Pause downloads after the configured amount is transferred during the daily time window.", |ui| {
+                        if toggle(ui, pal, &mut self.draft.quota.enabled).clicked() {
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Quota Amount", "Maximum megabytes downloaded in the quota window.", |ui| {
+                        if let Some(value) = self.number_row(ui, pal, "quota_mb", 90.0, "MB") {
+                            self.draft.quota.mb = (value.round() as u64).clamp(1, 1_000_000);
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Quota Start", "Start hour for the quota window (0-23).", |ui| {
+                        if let Some(value) = self.number_row(ui, pal, "quota_start", 70.0, ":00") {
+                            self.draft.quota.start_hour = (value.round() as u32).min(23);
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Quota End", "End hour for the quota window (0-23).", |ui| {
+                        if let Some(value) = self.number_row(ui, pal, "quota_end", 70.0, ":00") {
+                            self.draft.quota.end_hour = (value.round() as u32).min(23);
+                            self.set_dirty();
+                        }
+                    });
+                });
+            }
             let hit = self.section_hit("Connections", None);
             if self.rows_hit(
                 hit,
                 &[
                     ("Thread Count", "Number of parallel connections per download."),
+                    ("User Agent", "HTTP User-Agent sent by DM Ultra requests."),
                 ],
             ) {
                 section_card(ui, pal, Some(("Connections", None)), |ui, drawn| {
@@ -2458,6 +2538,19 @@ impl SettingsDialog {
                     srow!(self, ui, pal, first, drawn, hit, "Thread Count", "Number of parallel connections per download.", |ui| {
                         if let Some(v) = self.number_row(ui, pal, "threads", 70.0, "") {
                             self.draft.max_connections = (v.round() as u32).clamp(1, 64);
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "User Agent", "HTTP User-Agent sent by DM Ultra requests.", |ui| {
+                        if ui
+                            .add_sized(
+                                [220.0, 24.0],
+                                egui::TextEdit::singleline(&mut self.ua)
+                                    .hint_text("DM Ultra"),
+                            )
+                            .changed()
+                        {
+                            self.draft.user_agent = self.ua.trim().to_string();
                             self.set_dirty();
                         }
                     });
@@ -2480,6 +2573,114 @@ impl SettingsDialog {
                 });
             }
         }
+    }
+
+    fn page_file_types(&mut self, ui: &mut Ui, pal: ThemePalette) {
+        section_card(
+            ui,
+            pal,
+            Some(("Captured File Types", Some("Space-separated extensions"))),
+            |ui, drawn| {
+                *drawn = true;
+                let width = ui.available_width();
+                if ui
+                    .add_sized(
+                        [width, 100.0],
+                        egui::TextEdit::multiline(&mut self.file_types)
+                            .hint_text("ZIP EXE R0*"),
+                    )
+                    .changed()
+                {
+                    self.draft.file_types = self.file_types.trim().to_string();
+                    self.set_dirty();
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "These patterns control browser link capture and Site Grabber. Wildcards such as R0* are supported.",
+                    )
+                    .font(ui_font(11.0, false))
+                    .color(pal.muted),
+                );
+            },
+        );
+    }
+
+    fn page_site_logins(&mut self, ui: &mut Ui, pal: ThemePalette) {
+        section_card(
+            ui,
+            pal,
+            Some(("Site Logins", Some("Credentials used for matching download hosts"))),
+            |ui, drawn| {
+                *drawn = true;
+                ui.label(
+                    RichText::new(
+                        "A matching host automatically uses these credentials when a download starts.",
+                    )
+                    .font(ui_font(11.5, false))
+                    .color(pal.muted),
+                );
+                ui.add_space(8.0);
+                let mut remove = None;
+                egui::Grid::new("site-login-grid")
+                    .num_columns(4)
+                    .spacing([8.0, 6.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for label in ["Host pattern", "Username", "Password", ""] {
+                            ui.label(
+                                RichText::new(label)
+                                    .font(ui_font(11.0, true))
+                                    .color(pal.muted),
+                            );
+                        }
+                        ui.end_row();
+                        for index in 0..self.site_logins.len() {
+                            let mut changed = false;
+                            {
+                                let login = &mut self.site_logins[index];
+                                changed |= ui
+                                    .add_sized(
+                                        [150.0, 24.0],
+                                        egui::TextEdit::singleline(&mut login.pattern)
+                                            .hint_text("example.com or *.example.com"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add_sized(
+                                        [120.0, 24.0],
+                                        egui::TextEdit::singleline(&mut login.user)
+                                            .hint_text("Username"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add_sized(
+                                        [120.0, 24.0],
+                                        egui::TextEdit::singleline(&mut login.pass)
+                                            .password(true)
+                                            .hint_text("Password"),
+                                    )
+                                    .changed();
+                            }
+                            if ui.small_button("Remove").clicked() {
+                                remove = Some(index);
+                            }
+                            ui.end_row();
+                            if changed {
+                                self.site_logins_dirty = true;
+                            }
+                        }
+                    });
+                if let Some(index) = remove {
+                    self.site_logins.remove(index);
+                    self.site_logins_dirty = true;
+                }
+                if button(ui, pal, "Add Site Login", Btn::Secondary).clicked() {
+                    self.site_logins.push(SiteLogin::default());
+                    self.site_logins_dirty = true;
+                }
+            },
+        );
     }
 
     // ----- Proxy -----------------------------------------------------------
@@ -2666,6 +2867,7 @@ impl SettingsDialog {
                 hit,
                 &[
                     ("Completion Notifications", "Show a system notification when a download finishes."),
+                    ("Play completion sound", "Play a system sound when a download completes."),
                     ("Test Notification", "Preview the completion notification."),
                 ],
             ) {
@@ -2673,6 +2875,11 @@ impl SettingsDialog {
                     let mut first = true;
                     srow!(self, ui, pal, first, drawn, hit, "Completion Notifications", "Show a system notification when a download finishes.", |ui| {
                         if toggle(ui, pal, &mut self.draft.notify_on_complete).clicked() {
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Play completion sound", "Play a system sound when a download completes.", |ui| {
+                        if toggle(ui, pal, &mut self.draft.play_completion_sound).clicked() {
                             self.set_dirty();
                         }
                     });

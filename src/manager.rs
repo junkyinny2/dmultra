@@ -331,10 +331,13 @@ impl Manager {
     /// Start sequential queue processing (one file at a time).
     /// Runs as a background task; the GUI polls progress.
     pub fn start_queue(self: &Arc<Self>, name: String) {
-        if self.queue_running() {
+        if self
+            .queue_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             return;
         }
-        self.queue_running.store(true, Ordering::SeqCst);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         *self.queue_cancel.lock().unwrap() = Some(cancel_tx.clone());
         let manager = self.clone();

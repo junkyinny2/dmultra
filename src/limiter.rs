@@ -94,7 +94,7 @@ pub struct QuotaTracker {
     pub bytes: AtomicU64,
     /// Whether the quota tripped (downloads must stop).
     pub tripped: AtomicBool,
-    config: crate::state::Quota,
+    config: std::sync::RwLock<crate::state::Quota>,
     window_start: tokio::sync::Mutex<Instant>,
 }
 
@@ -103,14 +103,27 @@ impl QuotaTracker {
         Arc::new(QuotaTracker {
             bytes: AtomicU64::new(0),
             tripped: AtomicBool::new(false),
-            config,
+            config: std::sync::RwLock::new(config),
             window_start: tokio::sync::Mutex::new(Instant::now()),
         })
     }
 
-    fn in_window(&self) -> bool {
+    pub fn update_config(&self, config: crate::state::Quota) {
+        let mut current = self.config.write().unwrap();
+        let changed = current.enabled != config.enabled
+            || current.mb != config.mb
+            || current.start_hour != config.start_hour
+            || current.end_hour != config.end_hour;
+        *current = config;
+        if changed {
+            self.bytes.store(0, Ordering::SeqCst);
+            self.tripped.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn in_window(config: &crate::state::Quota) -> bool {
         let now = chrono::Local::now().time().hour() as u32;
-        let (s, e) = (self.config.start_hour, self.config.end_hour);
+        let (s, e) = (config.start_hour, config.end_hour);
         if s <= e {
             now >= s && now < e
         } else {
@@ -120,11 +133,12 @@ impl QuotaTracker {
 
     /// Record transferred bytes; returns true when the quota trips.
     pub async fn record(&self, n: u64) -> bool {
-        if !self.config.enabled {
+        let config = self.config.read().unwrap().clone();
+        if !config.enabled {
             return false;
         }
         let mut start = self.window_start.lock().await;
-        if !self.in_window() {
+        if !Self::in_window(&config) {
             // Window rolled over: auto-resume stopped downloads.
             self.bytes.store(0, Ordering::SeqCst);
             self.tripped.store(false, Ordering::SeqCst);
@@ -132,7 +146,7 @@ impl QuotaTracker {
             return false;
         }
         let used = self.bytes.fetch_add(n, Ordering::SeqCst) + n;
-        let limit = self.config.mb * 1024 * 1024;
+        let limit = config.mb * 1024 * 1024;
         if used >= limit {
             self.tripped.store(true, Ordering::SeqCst);
         }
@@ -147,6 +161,7 @@ impl QuotaTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::Quota;
 
     #[tokio::test]
     async fn limiter_disabled_is_free() {
@@ -162,5 +177,23 @@ mod tests {
         let t = Instant::now();
         l.acquire(128 * 1024).await; // 128 KiB at 64 KiB/s ~= 2s
         assert!(t.elapsed() >= Duration::from_millis(1500));
+    }
+
+    #[tokio::test]
+    async fn quota_config_changes_apply_to_live_tracker() {
+        let hour = chrono::Local::now().time().hour() as u32;
+        let quota = Quota {
+            enabled: true,
+            mb: 1,
+            start_hour: hour,
+            end_hour: (hour + 1) % 24,
+        };
+        let tracker = QuotaTracker::new(quota.clone());
+        assert!(tracker.record(1024 * 1024).await);
+
+        let mut disabled = quota;
+        disabled.enabled = false;
+        tracker.update_config(disabled);
+        assert!(!tracker.record(1).await);
     }
 }
