@@ -1814,6 +1814,48 @@ impl eframe::App for DmApp {
         self.sample_speeds();
         self.scheduler_tick();
 
+        // Poll the video overlay heartbeat written by the native messaging
+        // host. The overlay module owns the Win32 button thread.
+        #[cfg(windows)]
+        {
+            let overlay_path = crate::state::state_dir().join("pending").join("overlay.json");
+            let mut fed = false;
+            if let Ok(meta) = std::fs::metadata(&overlay_path) {
+                if let Ok(modified) = meta.modified() {
+                    if modified.elapsed().unwrap_or(std::time::Duration::from_secs(999))
+                        < std::time::Duration::from_secs(6)
+                    {
+                        if let Ok(data) = std::fs::read_to_string(&overlay_path) {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+                                let url = v.get("url").and_then(|s| s.as_str()).unwrap_or("");
+                                let format = v.get("format").and_then(|s| s.as_str()).unwrap_or("");
+                                let x = v.get("x").and_then(|n| n.as_i64()).unwrap_or(0) as i32;
+                                let y = v.get("y").and_then(|n| n.as_i64()).unwrap_or(0) as i32;
+                                let w = v.get("w").and_then(|n| n.as_i64()).unwrap_or(0) as i32;
+                                let h = v.get("h").and_then(|n| n.as_i64()).unwrap_or(0) as i32;
+                                let mut qualities = Vec::new();
+                                if let Some(qs) = v.get("qualities").and_then(|q| q.as_array()) {
+                                    for q in qs {
+                                        let label = q.get("label").and_then(|s| s.as_str()).unwrap_or("");
+                                        let u = q.get("url").and_then(|s| s.as_str()).unwrap_or("");
+                                        if !u.is_empty() {
+                                            qualities.push((label.to_string(), u.to_string()));
+                                        }
+                                    }
+                                }
+                                crate::overlay::update_overlay(url, format, qualities, x, y, w, h);
+                                fed = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if !fed {
+                crate::overlay::hide_overlay();
+            }
+            crate::overlay::tick();
+        }
+
         // -------------------------------------------------------------------
         // 1. Menu Bar (Tasks, File, Downloads, View, Help)
         // -------------------------------------------------------------------
