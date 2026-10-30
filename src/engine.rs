@@ -300,7 +300,7 @@ pub async fn run(
                 crate::hooks::notify(&state, crate::hooks::EVENT_COMPLETED, &done).await;
                 let settings = { state.lock().await.settings.clone() };
                 if settings.play_completion_sound {
-                    play_completion_sound();
+                    play_completion_sound(&settings.completion_sound);
                 }
                 return (done, Outcome::Complete { total });
             }
@@ -818,7 +818,7 @@ async fn run_attempt(
     persist(&state, &done).await;
     crate::hooks::notify(&state, crate::hooks::EVENT_COMPLETED, &done).await;
     if settings.play_completion_sound {
-        play_completion_sound();
+        play_completion_sound(&settings.completion_sound);
     }
     let total_out = done.file_size;
     (done, Ok(Outcome::Complete { total: total_out }))
@@ -1511,7 +1511,12 @@ mod tests {
 }
 /// IDM "Sounds": system completion chime (PlaySound with a system
 /// alias - no asset file needed, works on every Windows install).
-fn play_completion_sound() {
+fn play_completion_sound(sound: &str) {
+    let sound = if sound.trim().is_empty() {
+        "SystemExclamation".to_string()
+    } else {
+        sound.to_string()
+    };
     #[cfg(windows)]
     {
         #[link(name = "winmm")]
@@ -1521,12 +1526,16 @@ fn play_completion_sound() {
         const SND_ALIAS: u32 = 0x0001_0000;
         const SND_ASYNC: u32 = 0x0001;
         const SND_NODEFAULT: u32 = 0x0002;
-        let alias: Vec<u16> = "SystemExclamation"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        const SND_FILENAME: u32 = 0x0002_0000;
+        let is_file = std::path::Path::new(&sound).exists();
+        let flags = if is_file {
+            SND_FILENAME | SND_ASYNC
+        } else {
+            SND_ALIAS | SND_ASYNC | SND_NODEFAULT
+        };
+        let buf: Vec<u16> = sound.encode_utf16().chain(std::iter::once(0)).collect();
         unsafe {
-            PlaySoundW(alias.as_ptr(), 0, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+            PlaySoundW(buf.as_ptr(), 0, flags);
         }
     }
 }

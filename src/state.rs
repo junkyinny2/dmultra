@@ -359,6 +359,9 @@ pub struct Settings {
     pub browser_auto_download: bool,
     /// Play a system sound when a download completes (IDM "Sounds").
     pub play_completion_sound: bool,
+    /// Completion sound alias or path to a .wav file.
+    #[serde(default)]
+    pub completion_sound: String,
     /// Set the downloaded file's modification time from the server's
     /// Last-Modified header.
     pub use_server_file_time: bool,
@@ -369,6 +372,9 @@ pub struct Settings {
     pub window_pos: Option<[f32; 2]>,
     /// Last main-window inner size, in points ([w, h]).
     pub window_size: Option<[f32; 2]>,
+    /// Per-host connection limits (IDM `MCN\\<host>\\number`).
+    #[serde(default)]
+    pub host_connection_limits: std::collections::BTreeMap<String, u32>,
 
     // ----- Post-download actions (IDM "After downloading" / "Antivirus") -----
     /// Global action after a download completes: `none` | `program` |
@@ -507,10 +513,13 @@ impl Default for Settings {
             window_positions: std::collections::BTreeMap::new(),
             browser_auto_download: false,
             play_completion_sound: true,
+            completion_sound: "SystemExclamation".into(),
             use_server_file_time: false,
             file_exists_mode: "rename".into(),
             window_pos: None,
             window_size: None,
+
+            host_connection_limits: std::collections::BTreeMap::new(),
 
             post_action: "none".into(),
             post_program: String::new(),

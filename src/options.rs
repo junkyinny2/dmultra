@@ -890,6 +890,7 @@ impl SettingsDialog {
         self.num.insert("threads", self.draft.max_connections.to_string());
         self.num.insert("limit", (self.draft.speed_limit_bps / 1024).max(1).to_string());
 self.num.insert("power-delay", self.draft.power_delay_secs.to_string());
+self.num.insert("refresh-secs", self.draft.refresh_address_secs.to_string());
         self.num.insert("quota_mb", self.draft.quota.mb.to_string());
         self.num.insert("quota_start", self.draft.quota.start_hour.to_string());
         self.num.insert("quota_end", self.draft.quota.end_hour.to_string());
@@ -2603,6 +2604,30 @@ impl SettingsDialog {
                 });
             }
 
+            let hit = self.section_hit("Refresh Address", None);
+            if self.rows_hit(
+                hit,
+                &[
+                    ("Refresh download address", "Re-probe a download when its URL changes."),
+                ],
+            ) {
+                section_card(ui, pal, Some(("Refresh Address", None)), |ui, drawn| {
+                    let mut first = true;
+                    srow!(self, ui, pal, first, drawn, hit, "Refresh download address", "Re-probe a download when its URL changes.", |ui| {
+                        if toggle(ui, pal, &mut self.draft.refresh_address_enabled).clicked() {
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Refresh interval (s)", "Seconds between address refresh probes.", |ui| {
+                        if let Some(v) = self.number_row(ui, pal, "refresh-secs", 120.0, "s") {
+                            self.draft.refresh_address_secs = (v.round() as u32).max(1);
+                            self.set_dirty();
+                        }
+                    });
+                });
+            }
+            self.num.insert("refresh-secs", self.draft.refresh_address_secs.to_string());
+
             let hit = self.section_hit("Quota", None);
             if self.rows_hit(
                 hit,
@@ -2995,6 +3020,11 @@ impl SettingsDialog {
                     });
                     srow!(self, ui, pal, first, drawn, hit, "Play completion sound", "Play a system sound when a download completes.", |ui| {
                         if toggle(ui, pal, &mut self.draft.play_completion_sound).clicked() {
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Completion sound", "System alias (SystemExclamation) or path to a .wav file.", |ui| {
+                        if text_input(ui, pal, &mut self.draft.completion_sound, 220.0, "SystemExclamation").changed() {
                             self.set_dirty();
                         }
                     });

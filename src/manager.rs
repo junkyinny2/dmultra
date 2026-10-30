@@ -191,11 +191,16 @@ impl Manager {
         let limiter = self.limiter.clone();
         let quota = self.quota.clone();
         let sink: Arc<dyn ProgressSink> = stats.clone();
-        let conn_limit = Arc::new(AtomicU32::new(
-            rec.max_connections
-                .unwrap_or(self.lock_ui().settings.max_connections)
-                .clamp(1, 32),
-        ));
+        let host_limit = {
+            let st = self.lock_ui();
+            let host = url::Url::parse(&rec.url).ok().and_then(|u| u.host_str().map(|h| h.to_string()));
+            host.and_then(|h| st.settings.host_connection_limits.get(&h).copied())
+        };
+        let base_conn = rec
+            .max_connections
+            .or(host_limit)
+            .unwrap_or(self.lock_ui().settings.max_connections);
+        let conn_limit = Arc::new(AtomicU32::new(base_conn.clamp(1, 32)));
         let conn_limit_task = conn_limit.clone();
         let rec_cookies = rec.cookies.clone();
         let handle = runtime().spawn(async move {
@@ -378,11 +383,16 @@ impl Manager {
                 let limiter = manager.limiter.clone();
                 let quota = manager.quota.clone();
                 let item_cancel = cancel_rx.clone();
-                let conn_limit = Arc::new(AtomicU32::new(
-                    rec.max_connections
-                        .unwrap_or(state.lock().await.settings.max_connections)
-                        .clamp(1, 32),
-                ));
+                let host_limit = {
+                    let st = state.lock().await;
+                    let host = url::Url::parse(&rec.url).ok().and_then(|u| u.host_str().map(|h| h.to_string()));
+                    host.and_then(|h| st.settings.host_connection_limits.get(&h).copied())
+                };
+                let base_conn = rec
+                    .max_connections
+                    .or(host_limit)
+                    .unwrap_or(state.lock().await.settings.max_connections);
+                let conn_limit = Arc::new(AtomicU32::new(base_conn.clamp(1, 32)));
                 let conn_limit_task = conn_limit.clone();
                 let rec_cookies = rec.cookies.clone();
                 let handle = runtime().spawn(async move {
