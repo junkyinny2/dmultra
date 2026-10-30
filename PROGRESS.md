@@ -24,5 +24,22 @@
 - [x] Phase 1: Options → Download: "After download" + "Antivirus" sections.
 - [x] Built, deployed, tagged v0.031, published release.
 
-## v0.032 … v0.038
-- See `PARITY_PLAN.md` phases 2–8. Not started.
+## v0.032 (released)
+- Completion sound alias/path setting + per-host connection limits + refresh-address settings + UI.
+
+## v0.033 (released)
+- Import/export download list (JSON) via File menu.
+- Batch download URL expansion (numeric ranges, alternation) in Add URL.
+- Per-host connection limits applied by the manager.
+
+## v0.034 (released)
+- HTTP Cookie header from browser-captured cookies.
+- Per-download User-Agent override applied to engine + client.
+- Referer already threaded (confirmed).
+
+## v0.035 … v0.038 (not started)
+- Phase 5: browser parity (extension panel, Site Grabber depth, video sniffing).
+- Phase 6: DASH + built-in fMP4 remux + FFmpeg hook.
+- Phase 7: RTSP + scheduler/dial-up + MMS fallback.
+- Phase 8: FTP/proxy/language audit + full parity audit.
+- See `PARITY_PLAN.md`.
