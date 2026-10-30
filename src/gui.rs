@@ -1828,6 +1828,7 @@ impl eframe::App for DmApp {
                         if let Ok(data) = std::fs::read_to_string(&overlay_path) {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
                                 let url = v.get("url").and_then(|s| s.as_str()).unwrap_or("");
+                                let title = v.get("title").and_then(|s| s.as_str()).unwrap_or("");
                                 let format = v.get("format").and_then(|s| s.as_str()).unwrap_or("");
                                 let x = v.get("x").and_then(|n| n.as_i64()).unwrap_or(0) as i32;
                                 let y = v.get("y").and_then(|n| n.as_i64()).unwrap_or(0) as i32;
@@ -1843,7 +1844,7 @@ impl eframe::App for DmApp {
                                         }
                                     }
                                 }
-                                crate::overlay::update_overlay(url, format, qualities, x, y, w, h);
+                                crate::overlay::update_overlay(url, title, format, qualities, x, y, w, h);
                                 fed = true;
                             }
                         }

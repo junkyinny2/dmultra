@@ -221,6 +221,7 @@ function sendOverlayUpdateNow() {
     chrome.runtime.sendMessage({
       action: 'videoOverlay',
       url: best.url,
+      title: document.title || '',
       format: best.format,
       x: rect.x,
       y: rect.y,

@@ -39,6 +39,8 @@ pub struct OverlayState {
     pub h: AtomicI32,
     /// Video URL to download when clicked.
     pub url: std::sync::Mutex<String>,
+    /// Friendly title / file name shown in the menu header.
+    pub title: std::sync::Mutex<String>,
     /// Video format label (MP4, M3U8, WEBM, etc).
     pub format: std::sync::Mutex<String>,
     /// Available qualities (one per line: "MP4 - 1920x1080|https://...").
@@ -69,6 +71,7 @@ impl Default for OverlayState {
             w: AtomicI32::new(0),
             h: AtomicI32::new(0),
             url: std::sync::Mutex::new(String::new()),
+            title: std::sync::Mutex::new(String::new()),
             format: std::sync::Mutex::new(String::new()),
             qualities: std::sync::Mutex::new(Vec::new()),
             menu_open: AtomicBool::new(false),
@@ -88,7 +91,8 @@ impl Default for OverlayState {
 /// Menu remains wider (220px) to show quality labels.
 const BTN_W: i32 = 26;
 const BTN_H: i32 = 26;
-const MENU_W: i32 = 220;
+const MENU_W: i32 = 260;
+const MENU_HEADER_H: i32 = 22;
 const MENU_ITEM_H: i32 = 24;
 
 /// A video smaller than this is not "playing in a browser window" - it is
@@ -342,6 +346,7 @@ fn geometry_ok(x: i32, y: i32, w: i32, h: i32) -> bool {
 /// Update the overlay with new video info from the browser extension.
 pub fn update_overlay(
     url: &str,
+    title: &str,
     format: &str,
     qualities: Vec<(String, String)>,
     screen_x: i32,
@@ -364,14 +369,27 @@ pub fn update_overlay(
 
     let st = state();
     let was_visible = st.visible.load(Ordering::Relaxed);
+    // Derive a friendly title from the URL if none was supplied.
+    let title = if title.trim().is_empty() {
+        url.rsplit('/').next().unwrap_or(url).split('?').next().unwrap_or(url).to_string()
+    } else {
+        title.to_string()
+    };
     let video_changed = {
         let mut u = st.url.lock().unwrap();
+        let mut t = st.title.lock().unwrap();
         let mut f = st.format.lock().unwrap();
-        let changed = *u != url || *f != format;
+        let changed = *u != url || *t != title || *f != format;
         *u = url.to_string();
+        *t = title;
         *f = format.to_string();
         changed
     };
+    // Ensure at least one selectable entry.
+    let mut qualities = qualities;
+    if qualities.is_empty() {
+        qualities.push((format.to_uppercase(), url.to_string()));
+    }
     *st.qualities.lock().unwrap() = qualities;
     st.x.store(screen_x, Ordering::Relaxed);
     st.y.store(screen_y, Ordering::Relaxed);
@@ -565,7 +583,7 @@ fn reposition_window(hwnd: isize, force: bool) {
 
     let menu_open = st.menu_open.load(Ordering::Relaxed);
     let height = if menu_open {
-        BTN_H + MENU_ITEM_H * st.qualities.lock().unwrap().len().min(8) as i32
+        BTN_H + MENU_HEADER_H + MENU_ITEM_H * st.qualities.lock().unwrap().len().min(8) as i32
     } else {
         BTN_H
     };
@@ -653,9 +671,9 @@ unsafe extern "system" fn overlay_wndproc(
                     // Clicked the button area -> close menu.
                     st.menu_open.store(false, Ordering::Relaxed);
                     reposition_window(hwnd, true);
-                } else if y >= BTN_H {
+                } else if y >= BTN_H + MENU_HEADER_H {
                     // Clicked a menu item.
-                    let idx = (y - BTN_H) / MENU_ITEM_H;
+                    let idx = (y - BTN_H - MENU_HEADER_H) / MENU_ITEM_H;
                     let quals = st.qualities.lock().unwrap();
                     if idx >= 0 && (idx as usize) < quals.len() {
                         let (label, url) = &quals[idx as usize];
@@ -714,7 +732,7 @@ fn paint_window(hwnd: isize, st: &OverlayState) {
         let menu_open = st.menu_open.load(Ordering::Relaxed);
         let qual_count = st.qualities.lock().unwrap().len().min(8) as i32;
         let total_h = if menu_open {
-            BTN_H + MENU_ITEM_H * qual_count
+            BTN_H + MENU_HEADER_H + MENU_ITEM_H * qual_count
         } else {
             BTN_H
         };
@@ -771,13 +789,26 @@ fn paint_window(hwnd: isize, st: &OverlayState) {
 
         // Draw dropdown menu if open.
         if menu_open {
+            // Header row with the video title / file name.
+            let header_brush = CreateSolidBrush(0x00E8E8E8);
+            let header_rc = RECT { left: 0, top: BTN_H, right: MENU_W, bottom: BTN_H + MENU_HEADER_H };
+            FillRect(hdc, &header_rc, header_brush);
+            DeleteObject(header_brush);
+            let title = st.title.lock().unwrap().clone();
+            if !title.is_empty() {
+                let title_text: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+                SetBkMode(hdc, TRANSPARENT_BK);
+                SetTextColor(hdc, 0x001A1A2E);
+                TextOutW(hdc, 10, BTN_H + 4, title_text.as_ptr(), (title_text.len() - 1) as i32);
+            }
+
             let menu_brush = CreateSolidBrush(COLOR_MENU_FACE);
             for i in 0..qual_count {
                 let item_rc = RECT {
                     left: 0,
-                    top: BTN_H + i * MENU_ITEM_H,
+                    top: BTN_H + MENU_HEADER_H + i * MENU_ITEM_H,
                     right: MENU_W,
-                    bottom: BTN_H + (i + 1) * MENU_ITEM_H,
+                    bottom: BTN_H + MENU_HEADER_H + (i + 1) * MENU_ITEM_H,
                 };
                 FillRect(hdc, &item_rc, menu_brush);
             }
@@ -785,7 +816,7 @@ fn paint_window(hwnd: isize, st: &OverlayState) {
 
             let quals = st.qualities.lock().unwrap();
             for (i, (label, _)) in quals.iter().take(8).enumerate() {
-                let y = BTN_H + i as i32 * MENU_ITEM_H;
+                let y = BTN_H + MENU_HEADER_H + i as i32 * MENU_ITEM_H;
                 let item_text: Vec<u16> =
                     label.encode_utf16().chain(std::iter::once(0)).collect();
                 SetBkMode(hdc, TRANSPARENT_BK);
