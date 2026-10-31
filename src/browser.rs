@@ -800,6 +800,159 @@ pub fn host_loop() -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Wake a minimized window when a browser file arrives
+// ---------------------------------------------------------------------------
+
+/// True when at least one queued download request is waiting.
+fn has_pending_download() -> bool {
+    let Ok(entries) = std::fs::read_dir(pending_dir()) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        is_pending_queue_name(&entry.file_name().to_string_lossy())
+    })
+}
+
+/// eframe 0.27 deliberately skips scheduled repaints for a minimized window
+/// (`run.rs`: `if is_minimized { false }`), so the pending queue was only
+/// read after the user restored the main window. A browser click while
+/// minimized therefore looked like it did nothing.
+///
+/// This watcher posts a synthetic `WM_SIZE` to the main window. winit turns
+/// every `WM_SIZE` into `WindowEvent::Resized`, and eframe treats a resize as
+/// an *immediate* repaint (`EventResult::RepaintNow`), which runs one frame
+/// even while minimized. That frame reads the queue, starts the download and
+/// opens its progress window; the main window stays minimized and is never
+/// resized for real.
+#[cfg(windows)]
+pub fn spawn_pending_waker() {
+    let _ = std::thread::Builder::new()
+        .name("pending-waker".into())
+        .spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            if !has_pending_download() {
+                continue;
+            }
+            let Some(hwnd) = wakeup::main_window() else {
+                continue;
+            };
+            if unsafe { wakeup::IsIconic(hwnd) } != 0 {
+                wakeup::post_resize(hwnd);
+            }
+        });
+}
+
+#[cfg(not(windows))]
+pub fn spawn_pending_waker() {}
+
+#[cfg(windows)]
+mod wakeup {
+    use std::ffi::c_int;
+
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct WindowPlacement {
+        length: u32,
+        flags: u32,
+        show_cmd: u32,
+        pt_min: Point,
+        pt_max: Point,
+        rc_normal: Rect,
+    }
+
+    const WM_SIZE: u32 = 0x0005;
+    const SIZE_RESTORED: usize = 0;
+    const SIZE_MAXIMIZED: usize = 2;
+    /// `WPF_RESTORETOMAXIMIZED`: the window was maximized before minimizing.
+    const WPF_RESTORE_TO_MAXIMIZED: u32 = 0x0002;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumWindows(cb: extern "system" fn(isize, isize) -> i32, lparam: isize) -> i32;
+        fn GetWindowTextW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
+        fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+        pub(super) fn IsIconic(hwnd: isize) -> c_int;
+        fn GetWindowPlacement(hwnd: isize, placement: *mut WindowPlacement) -> c_int;
+        fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> c_int;
+    }
+
+    extern "system" fn find_main(hwnd: isize, found: isize) -> i32 {
+        let mut pid: u32 = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, &mut pid);
+        }
+        if pid != std::process::id() {
+            return 1;
+        }
+        let mut buf = [0u16; 256];
+        let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+        if len > 0 {
+            let title = String::from_utf16_lossy(&buf[..len as usize]);
+            if title == "DM Ultra" || title.starts_with("DM Ultra v") {
+                unsafe {
+                    *(found as *mut isize) = hwnd;
+                }
+                return 0;
+            }
+        }
+        1
+    }
+
+    /// HWND of this process' main window, if it exists.
+    pub(super) fn main_window() -> Option<isize> {
+        let mut found: isize = 0;
+        unsafe {
+            EnumWindows(find_main, &mut found as *mut isize as isize);
+        }
+        (found != 0).then_some(found)
+    }
+
+    /// Ask winit/eframe for one frame without changing the real window size.
+    pub(super) fn post_resize(hwnd: isize) {
+        let mut placement = WindowPlacement {
+            length: std::mem::size_of::<WindowPlacement>() as u32,
+            ..Default::default()
+        };
+        let known = unsafe { GetWindowPlacement(hwnd, &mut placement) } != 0;
+        // The restored size, so the temporary surface resize is a no-op.
+        let (width, height) = if known {
+            (
+                (placement.rc_normal.right - placement.rc_normal.left).max(320),
+                (placement.rc_normal.bottom - placement.rc_normal.top).max(240),
+            )
+        } else {
+            (900, 600)
+        };
+        // Keep a previously maximized window maximized.
+        let wparam = if known && placement.flags & WPF_RESTORE_TO_MAXIMIZED != 0 {
+            SIZE_MAXIMIZED
+        } else {
+            SIZE_RESTORED
+        };
+        let lparam = (((height as u32) & 0xFFFF) << 16 | ((width as u32) & 0xFFFF)) as isize;
+        unsafe {
+            PostMessageW(hwnd, WM_SIZE, wparam, lparam);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{is_pending_queue_name, manifest_firefox_json, manifest_json};

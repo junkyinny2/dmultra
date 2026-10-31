@@ -78,3 +78,13 @@
   over by a serde alias. The alias is gone and the option is now
   "Ask before downloading browser links" (default off).
 - Logged when a capture opens File Info, to make this diagnosable.
+
+## v0.044 (built, not published)
+- Browser clicks now work while the main window is minimized: eframe
+  0.27 skips scheduled repaints for minimized windows, so the queue was
+  only read after a restore. A watcher thread posts a synthetic WM_SIZE,
+  which winit/eframe turn into one immediate frame, so the download starts
+  and its progress window opens with the main window left minimized.
+- Progress/utility windows open centred on the desktop work area when the
+  main window is minimized (previously they fell back to 120,120).
+- Added `test-minimized-capture.ps1` (end-to-end check for this scenario).

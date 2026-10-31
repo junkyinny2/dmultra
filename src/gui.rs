@@ -113,6 +113,15 @@ mod native_win {
         fn GetWindowTextW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
         fn GetWindowRect(hwnd: isize, rect: *mut RectL) -> i32;
         fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+        fn SystemParametersInfoW(action: u32, param: u32, pv: *mut RectL, win_ini: u32) -> i32;
+    }
+
+    /// Desktop work area (screen minus taskbar), in physical pixels.
+    pub fn work_area() -> Option<RectL> {
+        const SPI_GETWORKAREA: u32 = 0x0030;
+        let mut rect = RectL::default();
+        let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut rect, 0) };
+        (ok != 0).then_some(rect)
     }
 
     static COLLECTED: Mutex<Vec<(isize, String)>> = Mutex::new(Vec::new());
@@ -229,19 +238,29 @@ fn centered_on_main_pos(
     outer_w: f32,
     outer_h: f32,
 ) -> Option<egui::Pos2> {
-    let (left, top, right, bottom) = native_win::window_rect("DM Ultra")?;
-    // A minimized window parks at (-32000, -32000); do not center
-    // relative to that.
-    if left < -10_000 || right <= left || bottom <= top {
-        return None;
-    }
     let ppp = ctx.pixels_per_point();
     let to_logical = |v: i32| v as f32 / ppp;
-    let main_w = to_logical(right - left);
-    let main_h = to_logical(bottom - top);
+    if let Some((left, top, right, bottom)) = native_win::window_rect("DM Ultra") {
+        // A minimized window parks at (-32000, -32000); do not center
+        // relative to that.
+        if left > -10_000 && right > left && bottom > top {
+            let main_w = to_logical(right - left);
+            let main_h = to_logical(bottom - top);
+            return Some(egui::pos2(
+                to_logical(left) + ((main_w - outer_w) * 0.5).max(0.0),
+                to_logical(top) + ((main_h - outer_h) * 0.5).max(0.0),
+            ));
+        }
+    }
+    // No usable main window (minimized, or not created yet). A progress
+    // window opened from a browser click must still land on screen, so
+    // centre it over the desktop work area instead.
+    let area = native_win::work_area()?;
+    let area_w = to_logical(area.right - area.left);
+    let area_h = to_logical(area.bottom - area.top);
     Some(egui::pos2(
-        to_logical(left) + ((main_w - outer_w) * 0.5).max(0.0),
-        to_logical(top) + ((main_h - outer_h) * 0.5).max(0.0),
+        to_logical(area.left) + ((area_w - outer_w) * 0.5).max(0.0),
+        to_logical(area.top) + ((area_h - outer_h) * 0.5).max(0.0),
     ))
 }
 
@@ -4425,6 +4444,9 @@ pub fn launch(manager: Arc<Manager>) -> Result<()> {
     };
 
     let app = DmApp::new(manager);
+    // Browser clicks must be picked up even while the window is minimized:
+    // the watcher nudges the (otherwise idle) event loop. See browser.rs.
+    crate::browser::spawn_pending_waker();
     eframe::run_native(&title, options, Box::new(move |_cc| Box::new(app)))
         .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
 }
