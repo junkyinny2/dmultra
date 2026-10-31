@@ -3913,7 +3913,10 @@ impl DmApp {
                 .round() as u64;
             let filename = d.save_path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
-            let key = format!("dl-progress-{}", id);
+            // A shared key so the last position a progress window was moved
+            // to is reused for the next download, instead of reverting to the
+            // centred default for every new download id.
+            let key = "dl-progress".to_string();
             let initial_pos = self.saved_position(ctx, &key, [500.0, 360.0]);
 
             ctx.show_viewport_immediate(

@@ -109,7 +109,10 @@
   minimizes the window, queues the URL like the native host does, and checks
   that the progress bar is actually painted to 100% on screen.
 
-## v0.047 (built, not published)
+## v0.048 (built, not published)
+- Download status (progress) window now remembers the last position it was
+  moved to and reuses it for the next download, instead of reverting to
+  the centred default for every new download id.
 - "Launch at Startup" now works: writes/removes the HKCU Run value
   `DM Ultra`, pointing at `<exe> --background`. The entry is repaired on
   every launch and removed when the option is turned off; it can also be
