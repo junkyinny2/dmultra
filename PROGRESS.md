@@ -109,7 +109,16 @@
   minimizes the window, queues the URL like the native host does, and checks
   that the progress bar is actually painted to 100% on screen.
 
-## v0.048 (built, not published)
+## v0.051 (built, not published)
+- The frame waker now drives frames whenever a child window is open, even
+  when the main window is visible, so closing a dialog takes effect within
+  one frame instead of waiting for the next idle pulse.
+- Closing a child window (progress/dialog) via its title-bar X or in-app
+  Close button now hides it instantly (`ViewportCommand::Visible(false)`)
+  instead of waiting for the root frame to garbage-collect it.
+- Closing a child window (progress/dialog) via its title-bar X or Close
+  button no longer waits for the next 500 ms idle pulse: the root frame is
+  woken immediately so the window is destroyed at once.
 - Download status (progress) window now remembers the last position it was
   moved to and reuses it for the next download, instead of reverting to
   the centred default for every new download id.

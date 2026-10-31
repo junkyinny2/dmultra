@@ -2044,6 +2044,13 @@ impl eframe::App for DmApp {
             self.manager.active_count() > 0 || child_window_open,
             Ordering::Relaxed,
         );
+        // Keep repainting while a dialog is open so its close button and
+        // title-bar X take effect within a frame instead of waiting for
+        // user input (immediate viewports are driven by the parent frame).
+        if child_window_open {
+            ctx.request_repaint();
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         // Clipboard watcher: when enabled, copying a download link opens
         // the Add-URL window and remains active while the app is idle.
         if settings_snapshot.monitor_clipboard {
@@ -3208,6 +3215,7 @@ impl DmApp {
             |ctx, _class| {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
                 // Remember the spot only if the user moved it.
                 self.record_popout_move(ctx, "add-url", initial_pos);
@@ -3315,6 +3323,7 @@ impl DmApp {
 
         if close_requested {
             self.add_dialog.open = false;
+            crate::browser::wake_main_window_now();
         }
     }
 
@@ -3338,6 +3347,7 @@ impl DmApp {
             |ctx, _class| {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
                 self.record_popout_move(ctx, "delete-confirm", initial_pos);
                 egui::CentralPanel::default()
@@ -3401,6 +3411,7 @@ impl DmApp {
 
         if close_requested {
             self.delete_confirm.open = false;
+            crate::browser::wake_main_window_now();
         }
     }
 
@@ -3580,6 +3591,7 @@ impl DmApp {
             |ctx, _class| {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
                 self.record_popout_move(ctx, "site-grabber", initial_pos);
 
@@ -3762,6 +3774,7 @@ impl DmApp {
                             }
                             if ui.button("Close").clicked() {
                                 close_requested = true;
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                             }
                         });
                     });
@@ -3771,6 +3784,7 @@ impl DmApp {
         if close_requested {
             self.cancel_grabber();
             self.grabber_dialog.open = false;
+            crate::browser::wake_main_window_now();
         }
     }
 
@@ -3791,6 +3805,7 @@ impl DmApp {
             |ctx, _class| {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
                 self.record_popout_move(ctx, "scheduler", initial_pos);
                 let queues = {
@@ -3891,6 +3906,7 @@ impl DmApp {
 
         if close_requested {
             self.scheduler_dialog.open = false;
+            crate::browser::wake_main_window_now();
         }
     }
 
@@ -3930,6 +3946,7 @@ impl DmApp {
                 |ctx, _class| {
                     if ctx.input(|i| i.viewport().close_requested()) {
                         close_requested = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                     }
                     self.record_popout_move(ctx, &key, initial_pos);
                     egui::CentralPanel::default().frame(egui::Frame::none().fill(bg_panel()).inner_margin(Margin::same(14.0))).show(ctx, |ui| {
@@ -4039,6 +4056,7 @@ impl DmApp {
                             }
                             if ui.button(" Close ").clicked() {
                                 close_requested = true;
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                             }
                         });
                     });
@@ -4050,6 +4068,7 @@ impl DmApp {
 
         if close_requested {
             self.active_details_popouts.retain(|&pop_id| pop_id != id);
+            crate::browser::wake_main_window_now();
         }
     }
 

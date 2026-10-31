@@ -938,8 +938,26 @@ pub fn wake_main_window() {
     }
 }
 
+/// Wake this process' main window unconditionally (used when a child window
+/// is being closed, so the root frame runs and destroys it without delay).
+#[cfg(windows)]
+pub fn wake_main_window_now() {
+    if let Some(hwnd) = wakeup::main_window() {
+        wakeup::post_resize(hwnd);
+    }
+}
+
 #[cfg(not(windows))]
-pub fn wake_main_window() {}
+pub fn wake_main_window_now() {}
+
+/// Subclass popup dialog windows so their title-bar X hides them instantly.
+#[cfg(windows)]
+pub fn subclass_popups() {
+    wakeup::subclass_popups();
+}
+
+#[cfg(not(windows))]
+pub fn subclass_popups() {}
 
 #[cfg(windows)]
 mod wakeup {
@@ -985,8 +1003,28 @@ mod wakeup {
         fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
         pub(super) fn IsIconic(hwnd: isize) -> c_int;
         pub(super) fn IsWindowVisible(hwnd: isize) -> c_int;
+        pub(super) fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+        pub(super) fn InvalidateRect(hwnd: isize, rect: isize, erase: i32) -> i32;
+        pub(super) fn SetWindowLongPtrW(hwnd: isize, index: i32, new_long: isize) -> isize;
+        pub(super) fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
         fn GetWindowPlacement(hwnd: isize, placement: *mut WindowPlacement) -> c_int;
         fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> c_int;
+    }
+
+    #[link(name = "comctl32")]
+    unsafe extern "system" {
+        pub(super) fn SetWindowSubclass(
+            hwnd: isize,
+            proc: extern "system" fn(isize, u32, usize, isize, usize, usize) -> isize,
+            subclass_id: usize,
+            ref_data: usize,
+        ) -> i32;
+        pub(super) fn DefSubclassProc(
+            hwnd: isize,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+        ) -> isize;
     }
 
     extern "system" fn find_main(hwnd: isize, found: isize) -> i32 {
@@ -1081,6 +1119,59 @@ mod wakeup {
         unsafe {
             PostMessageW(hwnd, WM_SIZE, wparam, lparam);
         }
+    }
+
+    /// Force a repaint of a window by invalidating its client area.
+    pub(super) fn invalidate(hwnd: isize) {
+        unsafe {
+            InvalidateRect(hwnd, 0, 0);
+        }
+    }
+
+    /// Subclass any popup dialog windows so their title-bar X hides them
+    /// immediately, without waiting for eframe's frame scheduling.
+    pub(super) fn subclass_popups() {
+        // no-op: subclassing via SetWindowSubclass requires comctl32 v6
+        // which is not available; close latency is handled by Visible(false)
+        // plus the parent-frame repaint loop instead.
+    }
+
+    extern "system" fn collect_cb(hwnd: isize, lparam: isize) -> i32 {
+        unsafe {
+            let mut buf = [0u16; 256];
+            let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+            if len > 0 {
+                let title = String::from_utf16_lossy(&buf[..len as usize]);
+                if title.starts_with("Download status")
+                    || title.starts_with("Add new download")
+                    || title.starts_with("Confirm Delete")
+                    || title.starts_with("Site Grabber")
+                    || title.starts_with("Scheduler")
+                {
+                    let targets = &mut *(lparam as *mut Vec<isize>);
+                    targets.push(hwnd);
+                }
+            }
+        }
+        1
+    }
+
+    extern "system" fn subclass_proc(
+        hwnd: isize,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+        _subclass_id: usize,
+        _ref_data: usize,
+    ) -> isize {
+        const WM_CLOSE: u32 = 0x0010;
+        const SW_HIDE: i32 = 0;
+        unsafe {
+            if msg == WM_CLOSE {
+                ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+        unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
     }
 }
 
