@@ -688,7 +688,9 @@ impl DmApp {
         }
     }
 
-    fn open_add_url(&mut self) {
+    /// Fill the Add-URL fields with the current defaults. Does not show the
+    /// window, so browser captures can create a download in the background.
+    fn prepare_add_url(&mut self) {
         let (default_dir, default_queue, connections) = {
             let st = self.manager.lock_ui();
             (
@@ -701,7 +703,6 @@ impl DmApp {
                 st.settings.max_connections.clamp(1, 32),
             )
         };
-        self.add_dialog.open = true;
         self.add_dialog.auto_started = false;
         self.add_dialog.save_as = default_dir.to_string_lossy().to_string();
         self.add_dialog.url.clear();
@@ -710,6 +711,11 @@ impl DmApp {
         self.add_dialog.queue = default_queue;
         self.add_dialog.connections = connections;
         self.add_dialog.error.clear();
+    }
+
+    fn open_add_url(&mut self) {
+        self.prepare_add_url();
+        self.add_dialog.open = true;
     }
 
     /// Open the Add-URL window prefilled with a URL (clipboard watcher
@@ -813,23 +819,28 @@ impl DmApp {
         let Some((url, referer)) = self.browser_pending.pop_front() else {
             return;
         };
-        let auto_download = self.manager.lock_ui().settings.browser_auto_download;
-        self.open_add_url();
+        // A browser click is an explicit "download this" instruction, so the
+        // download starts straight away. The Add-URL window is only used when
+        // the user asked for it, or when the capture could not be started
+        // (bad URL, missing save folder) and needs their attention.
+        let show_file_info = self.manager.lock_ui().settings.browser_show_file_info;
+        if show_file_info {
+            self.open_add_url();
+            self.add_dialog.url = url;
+            self.add_dialog.referer = (!referer.trim().is_empty()).then_some(referer);
+            self.status_bar = "Browser download link received.".into();
+            return;
+        }
+        self.prepare_add_url();
         self.add_dialog.url = url;
         self.add_dialog.referer = (!referer.trim().is_empty()).then_some(referer);
-        if auto_download {
-            if self.create_download(true) {
-                self.add_dialog.auto_started = true;
-                self.status_bar = "Browser download started; File Info is displayed.".into();
-            } else {
-                self.status_bar = format!(
-                    "Could not auto-download browser link: {}",
-                    self.add_dialog.error
-                );
-            }
+        if self.create_download(true) {
+            self.status_bar = "Download started from browser.".into();
         } else {
+            let error = self.add_dialog.error.clone();
             self.add_dialog.open = true;
-            self.status_bar = "Browser download link received.".into();
+            self.status_bar = format!("Could not start browser download: {error}");
+            crate::logfile::log("BROWSER", &format!("browser capture failed: {error}"));
         }
     }
 

@@ -361,8 +361,11 @@ pub struct Settings {
     /// stable dialog name (for example `add-url` or `dl-progress`).
     #[serde(default)]
     pub window_positions: std::collections::BTreeMap<String, [f32; 2]>,
-    /// Start downloads from browser link clicks immediately, without the File Info dialog.
-    pub browser_auto_download: bool,
+    /// Show the File Info (Add URL) window for browser link clicks instead
+    /// of starting the download straight away. Off by default: a browser
+    /// click starts downloading and only the progress window appears.
+    #[serde(default, alias = "browser_auto_download")]
+    pub browser_show_file_info: bool,
     /// Play a system sound when a download completes (IDM "Sounds").
     pub play_completion_sound: bool,
     /// Completion sound alias or path to a .wav file.
@@ -519,7 +522,7 @@ impl Default for Settings {
             list_col_visible: vec![true; 8],
             remember_window_pos: true,
             window_positions: std::collections::BTreeMap::new(),
-            browser_auto_download: false,
+            browser_show_file_info: false,
             play_completion_sound: true,
             completion_sound: "SystemExclamation".into(),
             use_server_file_time: false,

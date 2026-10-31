@@ -540,6 +540,12 @@ fn write_overlay_file(msg: &serde_json::Value, action: &str) {
     trace(&format!("host: overlay written ({action})"));
 }
 
+/// A queued browser request is only worth acting on while a GUI is around to
+/// consume it. The GUI polls this queue every 250 ms, so anything older than
+/// this was captured while DM Ultra was closed (or stalled) and must be
+/// discarded instead of being downloaded en masse when the app starts.
+const PENDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Pull the oldest pending browser message. Returns `(urls, referer)`:
 /// `urls` has one entry for single-URL messages or many for batches
 /// ("Grab links" / "Download videos" from the extension).
@@ -558,6 +564,27 @@ pub fn take_pending() -> Result<Option<(Vec<String>, String)>> {
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let path = e.path();
+        // Drop links captured while DM Ultra was not running. Without this
+        // the whole backlog was downloaded in one burst on the next launch.
+        let age = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok());
+        if let Some(age) = age {
+            if age > PENDING_MAX_AGE {
+                let _ = std::fs::remove_file(&path);
+                crate::logfile::log(
+                    "BROWSER",
+                    &format!(
+                        "discarded stale browser request ({:.0}s old): {}",
+                        age.as_secs_f32(),
+                        path.display()
+                    ),
+                );
+                continue;
+            }
+        }
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("read browser request {}", path.display()))?;
         let v = match serde_json::from_str::<serde_json::Value>(&raw) {

@@ -31,6 +31,80 @@ fn unix_nanos() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(windows)]
+fn gui_running() -> bool {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumWindows(callback: extern "system" fn(isize, isize) -> i32, context: isize) -> i32;
+        fn GetWindowTextW(hwnd: isize, text: *mut u16, max_count: i32) -> i32;
+    }
+
+    extern "system" fn find_main_window(hwnd: isize, context: isize) -> i32 {
+        let mut title = [0u16; 256];
+        let length = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) };
+        if length > 0 {
+            let title = String::from_utf16_lossy(&title[..length as usize]);
+            if title == "DM Ultra" || title.starts_with("DM Ultra v") {
+                unsafe {
+                    *(context as *mut bool) = true;
+                }
+                return 0;
+            }
+        }
+        1
+    }
+
+    let mut found = false;
+    unsafe {
+        EnumWindows(find_main_window, &mut found as *mut bool as isize);
+    }
+    found
+}
+
+#[cfg(not(windows))]
+fn gui_running() -> bool {
+    false
+}
+
+/// Start DM Ultra if it is not already running. A browser click should start
+/// the program and then the download, not just leave a file in the queue.
+fn ensure_gui_running() {
+    if gui_running() {
+        trace("nmh: gui already running");
+        return;
+    }
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let exe = dir.join("dmultra.exe");
+    if !exe.exists() {
+        trace(&format!("nmh: gui not found at {}", exe.display()));
+        return;
+    }
+    #[cfg(windows)]
+    let spawn = {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new(&exe)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            // CREATE_NO_WINDOW: never flash a console next to the browser.
+            .creation_flags(0x0800_0000)
+            .spawn()
+    };
+    #[cfg(not(windows))]
+    let spawn = std::process::Command::new(&exe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match spawn {
+        Ok(_) => trace("nmh: launched gui"),
+        Err(e) => trace(&format!("nmh: gui launch failed: {e}")),
+    }
+}
+
 fn main() {
     trace("nmh: started");
     let stdin = std::io::stdin();
@@ -116,7 +190,10 @@ fn main() {
                 serde_json::json!({"urls": urls, "referer": referer}).to_string()
             };
             match std::fs::write(dir.join(format!("{}.json", unix_nanos())), payload) {
-                Ok(()) => trace("nmh: pending written"),
+                Ok(()) => {
+                    trace("nmh: pending written");
+                    ensure_gui_running();
+                }
                 Err(e) => trace(&format!("nmh: pending write failed: {e}")),
             }
         }

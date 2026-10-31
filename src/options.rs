@@ -2161,8 +2161,8 @@ impl SettingsDialog {
                             }
                         }
                     });
-                    srow!(self, ui, pal, first, drawn, hit, "Start browser downloads immediately (show File Info)", "Start each browser-captured download immediately and keep the File Info window open to show the download details.", |ui| {
-                        if toggle(ui, pal, &mut self.draft.browser_auto_download).clicked() {
+                    srow!(self, ui, pal, first, drawn, hit, "Show File Info for browser downloads", "Show the File Info window when a browser link is captured. When off, clicking a link starts the download immediately and only the progress window opens.", |ui| {
+                        if toggle(ui, pal, &mut self.draft.browser_show_file_info).clicked() {
                             self.set_dirty();
                         }
                     });

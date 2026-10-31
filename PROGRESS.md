@@ -50,3 +50,24 @@
 - FTP/proxy/language audit: PAC URL, proxy-from-IE toggle, FFmpeg path UI,
   i18n loader + locales/en.json.
 - Full parity audit pass (see PARITY_PLAN.md matrix).
+
+## v0.039 (built, not published)
+- Sub-window positions now persist after a real move (mid-drag save was
+  being skipped, so the position was never recorded).
+- Options window follows the same rule.
+
+## v0.040 (built, not published)
+- Video overlay is wired to the extension heartbeat: the GUI reads
+  `pending/overlay.json` every frame and drives overlay::tick().
+
+## v0.041 (built, not published)
+- Overlay menu shows the video title plus the resolution/quality list.
+
+## v0.042 (built, not published)
+- Browser link clicks no longer open the Add-URL (File Info) window: the
+  download starts immediately and only the progress window appears.
+  Setting renamed to "Show File Info for browser downloads" (default off).
+- Pending browser queue entries older than 60 s are discarded instead of
+  being downloaded in a burst on the next launch.
+- `dmultra-nmh` now starts DM Ultra when it is not running, so a click is
+  not silently lost.

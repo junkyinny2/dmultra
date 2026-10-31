@@ -115,7 +115,10 @@ function addVideo(url, format, quality) {
 }
 
 // Parse m3u8 master playlist for variant resolutions.
+const hlsParsing = new Set();
 async function parseHLS(url) {
+  if (hlsParsing.has(url)) return;
+  hlsParsing.add(url);
   try {
     const resp = await fetch(url, { credentials: 'include' });
     const text = await resp.text();
@@ -142,6 +145,8 @@ async function parseHLS(url) {
     }
   } catch (e) {
     addVideo(url, 'm3u8', '');
+  } finally {
+    hlsParsing.delete(url);
   }
 }
 

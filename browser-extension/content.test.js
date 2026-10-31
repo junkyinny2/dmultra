@@ -9,6 +9,11 @@ const source = fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8');
 function createClickHarness() {
   let clickHandler;
   const sent = [];
+  const fetchCalls = [];
+  const fetch = async (url) => {
+    fetchCalls.push(url);
+    return { text: async () => '' };
+  };
   const document = {
     addEventListener(type, handler) {
       if (type === 'click') clickHandler = handler;
@@ -23,6 +28,7 @@ function createClickHarness() {
   }
   const window = {
     addEventListener() {},
+    fetch,
     innerWidth: 1200,
     innerHeight: 800,
     screenX: 0,
@@ -47,15 +53,22 @@ function createClickHarness() {
     setTimeout: () => 1,
     setInterval: () => 1,
     requestAnimationFrame() {},
-    fetch: async () => ({ text: async () => '' }),
+    fetch,
     XMLHttpRequest: function () {},
     console,
   };
+  Object.defineProperty(context, 'fetch', {
+    configurable: true,
+    get: () => window.fetch,
+    set: (value) => { window.fetch = value; },
+  });
   context.XMLHttpRequest.prototype.open = function () {};
   vm.runInNewContext(source, context);
 
   return {
     sent,
+    fetchCalls,
+    window,
     click({ anchor, target = anchor, path = [anchor, document], ...modifiers }) {
       let prevented = false;
       clickHandler({
@@ -106,4 +119,14 @@ test('leaves ordinary web navigation alone', () => {
   const link = anchor('https://host.test/about');
   assert.equal(harness.click({ anchor: link }), false);
   assert.equal(harness.sent.length, 0);
+});
+
+test('does not recursively parse an HLS playlist fetched by the parser', async () => {
+  const harness = createClickHarness();
+  await harness.window.fetch('https://host.test/video.m3u8');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(harness.fetchCalls, [
+    'https://host.test/video.m3u8',
+    'https://host.test/video.m3u8',
+  ]);
 });
