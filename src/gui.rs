@@ -114,6 +114,8 @@ mod native_win {
         fn GetWindowRect(hwnd: isize, rect: *mut RectL) -> i32;
         fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
         fn SystemParametersInfoW(action: u32, param: u32, pv: *mut RectL, win_ini: u32) -> i32;
+        fn GetSystemMetrics(index: i32) -> i32;
+        fn GetDpiForSystem() -> u32;
     }
 
     /// Desktop work area (screen minus taskbar), in physical pixels.
@@ -122,6 +124,35 @@ mod native_win {
         let mut rect = RectL::default();
         let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut rect, 0) };
         (ok != 0).then_some(rect)
+    }
+
+    /// Whole virtual desktop spanning every attached monitor, in physical
+    /// pixels: `(x, y, width, height)`.
+    pub fn virtual_screen() -> Option<(i32, i32, i32, i32)> {
+        const SM_XVIRTUALSCREEN: i32 = 76;
+        const SM_YVIRTUALSCREEN: i32 = 77;
+        const SM_CXVIRTUALSCREEN: i32 = 78;
+        const SM_CYVIRTUALSCREEN: i32 = 79;
+        let (x, y, w, h) = unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        };
+        (w > 0 && h > 0).then_some((x, y, w, h))
+    }
+
+    /// System DPI scale (1.0 at 96 DPI). Used to turn the physical pixel
+    /// metrics above into the logical points egui window builders expect.
+    pub fn system_scale() -> f32 {
+        let dpi = unsafe { GetDpiForSystem() };
+        if dpi == 0 {
+            1.0
+        } else {
+            dpi as f32 / 96.0
+        }
     }
 
     static COLLECTED: Mutex<Vec<(isize, String)>> = Mutex::new(Vec::new());
@@ -226,6 +257,54 @@ mod native_win {
         }
         None
     }
+}
+
+/// Screen position for a freshly opened main window: centred in the
+/// desktop work area. `inner` is the egui client size in points.
+#[cfg(target_os = "windows")]
+fn initial_center_pos(inner: [f32; 2]) -> Option<egui::Pos2> {
+    let area = native_win::work_area()?;
+    let scale = native_win::system_scale();
+    let to_logical = |v: i32| v as f32 / scale;
+    // `with_position` is an OUTER position, so account for the frame.
+    let outer_w = inner[0] + POPOUT_CHROME_W;
+    let outer_h = inner[1] + POPOUT_CHROME_H;
+    let area_w = to_logical(area.right - area.left);
+    let area_h = to_logical(area.bottom - area.top);
+    Some(egui::pos2(
+        to_logical(area.left) + ((area_w - outer_w) * 0.5).max(0.0),
+        to_logical(area.top) + ((area_h - outer_h) * 0.5).max(0.0),
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn initial_center_pos(_inner: [f32; 2]) -> Option<egui::Pos2> {
+    None
+}
+
+/// Whether a saved outer position still lands on an attached display.
+/// Used to avoid reopening completely off-screen after a monitor change.
+#[cfg(target_os = "windows")]
+fn monitor_bounds_ok(pos: [f32; 2], inner: [f32; 2]) -> bool {
+    let Some((vx, vy, vw, vh)) = native_win::virtual_screen() else {
+        return true;
+    };
+    let scale = native_win::system_scale();
+    let to_logical = |v: i32| v as f32 / scale;
+    let (vx, vy) = (to_logical(vx), to_logical(vy));
+    let (vw, vh) = (to_logical(vw), to_logical(vh));
+    let w = inner[0] + POPOUT_CHROME_W;
+    let h = inner[1] + POPOUT_CHROME_H;
+    // A title-bar-sized strip of the window must be reachable.
+    pos[0] + w > vx
+        && pos[1] + h > vy
+        && pos[0] < vx + vw - 80.0
+        && pos[1] < vy + vh - 40.0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn monitor_bounds_ok(_pos: [f32; 2], _inner: [f32; 2]) -> bool {
+    true
 }
 
 /// Position for a centered OS window of the given OUTER size over the
@@ -615,6 +694,9 @@ pub struct DmApp {
     browser_last_poll: Instant,
     browser_pending: VecDeque<(String, String)>,
     browser_last_error: String,
+    /// Throttles writing the main window position/size to state.json while
+    /// the user drags or resizes the window.
+    last_main_window_save: Instant,
 
     // Resizable/reorderable download-list columns
     column_widths: Vec<f32>,
@@ -702,6 +784,7 @@ impl DmApp {
             browser_last_poll: Instant::now() - Duration::from_secs(5),
             browser_pending: VecDeque::new(),
             browser_last_error: String::new(),
+            last_main_window_save: Instant::now() - Duration::from_secs(5),
             column_widths,
             column_visible,
         }
@@ -1790,6 +1873,9 @@ impl DmApp {
 // ---------------------------------------------------------------------------
 impl eframe::App for DmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Remember where the main window is (honours the setting).
+        self.track_main_window(ctx);
+
         // Handle background tray icon click
         if let Ok(mut flag) = self.show_flag.lock() {
             if *flag {
@@ -2888,6 +2974,11 @@ impl eframe::App for DmApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Flush the final window position/size, even if the debounce timer
+        // had not fired yet.
+        self.last_main_window_save = Instant::now() - Duration::from_secs(5);
+        let mut st = self.manager.lock_ui();
+        let _ = st.save();
         self.tray_icon = None;
     }
 
@@ -2895,6 +2986,61 @@ impl eframe::App for DmApp {
     /// in the active theme background instead of a foreign color.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         bg_dark().to_normalized_gamma_f32()
+    }
+}
+
+impl DmApp {
+    /// Remember where the main window is and how big it is, so the next
+    /// launch can restore it when "Remember window positions" is enabled.
+    ///
+    /// A maximized/minimized window is ignored: restoring the *normal*
+    /// rectangle is what users expect, not the parked one.
+    fn track_main_window(&mut self, ctx: &egui::Context) {
+        let (outer, inner, maximized, minimized) = ctx.input(|i| {
+            let viewport = i.viewport();
+            (
+                viewport.outer_rect,
+                viewport.inner_rect,
+                viewport.maximized.unwrap_or(false),
+                viewport.minimized.unwrap_or(false),
+            )
+        });
+        let Some(outer) = outer else {
+            return;
+        };
+        if maximized || minimized || outer.width() < 200.0 || outer.height() < 150.0 {
+            return;
+        }
+        let pos = [outer.min.x.round(), outer.min.y.round()];
+        let size = inner.map(|r| [r.width().round(), r.height().round()]);
+
+        let mut changed = false;
+        {
+            let mut st = self.manager.lock_ui();
+            if st.settings.remember_window_pos {
+                if st.settings.window_pos != Some(pos) {
+                    st.settings.window_pos = Some(pos);
+                    changed = true;
+                }
+                if let Some(size) = size {
+                    if st.settings.window_size != Some(size) {
+                        st.settings.window_size = Some(size);
+                        changed = true;
+                    }
+                }
+            } else if st.settings.window_pos.is_some() || st.settings.window_size.is_some() {
+                // Option is off: forget the stored spot so re-enabling it
+                // does not jump the window somewhere stale.
+                st.settings.window_pos = None;
+                st.settings.window_size = None;
+                changed = true;
+            }
+        }
+        if changed && self.last_main_window_save.elapsed() >= Duration::from_millis(700) {
+            self.last_main_window_save = Instant::now();
+            let mut st = self.manager.lock_ui();
+            let _ = st.save();
+        }
     }
 }
 
@@ -4430,13 +4576,48 @@ fn window_icon() -> Arc<egui::IconData> {
 
 pub fn launch(manager: Arc<Manager>) -> Result<()> {
     let title = format!("DM Ultra v{}", APP_VERSION.trim());
-    let viewport = ViewportBuilder::default()
+    const DEFAULT_INNER: [f32; 2] = [900.0, 566.0];
+    const MIN_INNER: [f32; 2] = [720.0, 480.0];
+
+    // Where the window opens:
+    //   * "Remember window positions" on + a saved spot -> exactly there
+    //     (unless that spot is on a monitor that is no longer attached, in
+    //     which case fall back to the centre of the screen);
+    //   * otherwise -> centred on the screen's work area.
+    let (remember, saved_pos, saved_size) = {
+        let st = manager.lock_ui();
+        (
+            st.settings.remember_window_pos,
+            st.settings.window_pos,
+            st.settings.window_size,
+        )
+    };
+    let inner_size = if remember {
+        saved_size
+            .filter(|size| size[0] >= MIN_INNER[0] && size[1] >= MIN_INNER[1])
+            .unwrap_or(DEFAULT_INNER)
+    } else {
+        DEFAULT_INNER
+    };
+    let initial_pos = if remember {
+        saved_pos
+            .filter(|pos| monitor_bounds_ok(*pos, inner_size))
+            .map(|pos| egui::pos2(pos[0], pos[1]))
+            .or_else(|| initial_center_pos(inner_size))
+    } else {
+        initial_center_pos(inner_size)
+    };
+
+    let mut viewport = ViewportBuilder::default()
         // Outer window lands at roughly the 916 x 605 reference size once
         // the native title bar and frame are added.
-        .with_inner_size([900.0, 566.0])
-        .with_min_inner_size([720.0, 480.0])
+        .with_inner_size(inner_size)
+        .with_min_inner_size(MIN_INNER)
         .with_title(title.clone())
         .with_icon(window_icon());
+    if let Some(pos) = initial_pos {
+        viewport = viewport.with_position(pos);
+    }
 
     let options = eframe::NativeOptions {
         viewport,

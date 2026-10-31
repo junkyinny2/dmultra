@@ -88,3 +88,12 @@
 - Progress/utility windows open centred on the desktop work area when the
   main window is minimized (previously they fell back to 120,120).
 - Added `test-minimized-capture.ps1` (end-to-end check for this scenario).
+
+## v0.045 (built, not published)
+- Main window opens centred on the desktop work area on first run.
+- With "Remember window positions" on, the last position *and* size are
+  saved (debounced while dragging) and restored on launch; a saved spot
+  that is no longer on any attached monitor falls back to centred.
+- Turning the option off clears the stored spot, so re-enabling it does not
+  jump to a stale position.
+- Added `test-main-window-placement.ps1`.
