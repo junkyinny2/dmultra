@@ -2060,12 +2060,31 @@ impl SettingsDialog {
                 hit,
                 &[
                     ("Launch at Startup", "Start DM Ultra automatically when you sign in to Windows."),
+                    ("Minimize behavior", "What the minimize button does: the taskbar, the tray, or both."),
                 ],
             ) {
                 section_card(ui, pal, Some(("Startup", None)), |ui, drawn| {
                     let mut first = true;
                     srow!(self, ui, pal, first, drawn, hit, "Launch at Startup", "Start DM Ultra automatically when you sign in to Windows.", |ui| {
                         if toggle(ui, pal, &mut self.draft.auto_startup).clicked() {
+                            self.set_dirty();
+                        }
+                    });
+                    srow!(self, ui, pal, first, drawn, hit, "Minimize behavior", "What the minimize button does: the taskbar, the tray, or both.", |ui| {
+                        let mut value = self.draft.minimize_mode.clone();
+                        if dropdown(
+                            ui,
+                            pal,
+                            "minimize-mode",
+                            &mut value,
+                            260.0,
+                            &[
+                                ("taskbar", "Minimize to taskbar"),
+                                ("taskbar_tray", "Taskbar and tray icon"),
+                                ("tray", "Tray only (hide from taskbar)"),
+                            ],
+                        ) {
+                            self.draft.minimize_mode = value;
                             self.set_dirty();
                         }
                     });

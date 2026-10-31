@@ -97,3 +97,45 @@
 - Turning the option off clears the stored spot, so re-enabling it does not
   jump to a stale position.
 - Added `test-main-window-placement.ps1`.
+
+## v0.046 (built, not published)
+- Fixed browser captures started while the main window is minimized: the
+  "Download status" window opened at 0% and never updated even though the
+  transfer completed. Immediate child viewports are only painted as part of
+  the parent window's frame, and eframe skips frames for minimized windows.
+  A `busy-waker` thread now posts a synthetic `WM_SIZE` every 150 ms while a
+  transfer is active or a child window is open, so progress repaints.
+- Added `test-minimized-progress.ps1`: serves a slow 12 MB file locally,
+  minimizes the window, queues the URL like the native host does, and checks
+  that the progress bar is actually painted to 100% on screen.
+
+## v0.047 (built, not published)
+- "Launch at Startup" now works: writes/removes the HKCU Run value
+  `DM Ultra`, pointing at `<exe> --background`. The entry is repaired on
+  every launch and removed when the option is turned off; it can also be
+  driven from the CLI with `dmultra config auto-startup true|false`.
+- Browser- and startup-launched instances use `--background`: the main
+  window stays hidden, and only the download status window and tray icon
+  appear.
+- One GUI at a time: a second launch asks the running instance to show its
+  window instead of starting a duplicate that would fight over state.json.
+- New "Minimize behavior" option: minimize to taskbar, taskbar + tray icon
+  (default, IDM-like), or tray only (the window leaves the taskbar). Close
+  hides to the tray in the tray modes; a left/double click on the tray icon
+  restores the window.
+- Windows reports a minimize as a zero-sized resize, which eframe drops, so
+  the app never saw the minimize and could not hide the window. The frame
+  waker now also wakes the app while tray-only mode is waiting for the
+  minimize.
+- A hidden window also gets no paint from Windows, so eframe's scheduled
+  repaints never run there either. The waker posts a slow (500 ms) synthetic
+  resize to a hidden window, and a tray click or a second launch wakes it
+  immediately; this is what lets the running instance notice the show
+  request and reveal its window.
+- Tray icon creation/visibility failures are logged instead of silently
+  ignored.
+- Added `test-startup-registry.ps1`, `test-minimize-modes.ps1`,
+  `test-single-instance.ps1`, and a `-Background` mode for
+  `test-minimized-progress.ps1`.
+- Removed the temporary `DMULTRA_NO_BUSY_WAKER` diagnostics gate from the
+  busy-frame waker.

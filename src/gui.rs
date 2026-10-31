@@ -643,7 +643,15 @@ pub struct DmApp {
     manager: Arc<Manager>,
     show_flag: Arc<Mutex<bool>>,
     show_main_window: bool,
+    /// One-shot: hide the main window after eframe's first-frame
+    /// anti-flash `set_visible(true)` when starting in the background.
+    hide_main_window: bool,
     tray_icon: Option<tray_icon::TrayIcon>,
+    /// Last applied tray-icon visibility, to avoid re-registering it each frame.
+    tray_visible: bool,
+    /// Previous minimized state, so the tray-only mode reacts to the
+    /// minimize button exactly once.
+    was_minimized: bool,
 
     // Nav & filtering
     selected_nav: NavCategory,
@@ -697,6 +705,15 @@ pub struct DmApp {
     /// Throttles writing the main window position/size to state.json while
     /// the user drags or resizes the window.
     last_main_window_save: Instant,
+    /// Throttles checking for a second-instance "show" request.
+    last_show_poll: Instant,
+    /// Set while the UI must keep painting even if the main window is
+    /// minimized (active transfers or open child windows). Read by the
+    /// frame waker in `browser::spawn_busy_waker`.
+    busy_frames: Arc<std::sync::atomic::AtomicBool>,
+    /// Set while "minimize to tray only" is active and the window is still
+    /// shown, so the waker can deliver the frame that hides it.
+    minimize_watch: Arc<std::sync::atomic::AtomicBool>,
 
     // Resizable/reorderable download-list columns
     column_widths: Vec<f32>,
@@ -704,10 +721,17 @@ pub struct DmApp {
 }
 
 impl DmApp {
-    pub fn new(manager: Arc<Manager>) -> Self {
+    pub fn new(manager: Arc<Manager>, start_hidden: bool) -> Self {
         let (clip_probe_tx, clip_probe_rx) = mpsc::channel();
         let show_flag = Arc::new(Mutex::new(false));
-        let tray_icon = create_tray_icon(show_flag.clone()).ok();
+        let minimize_watch = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tray_icon = match create_tray_icon(show_flag.clone()) {
+            Ok(tray) => Some(tray),
+            Err(error) => {
+                crate::logfile::log("TRAY", &format!("tray icon unavailable: {error}"));
+                None
+            }
+        };
         let (accent, column_widths, column_visible) = {
             let st = manager.lock_ui();
             (
@@ -729,8 +753,11 @@ impl DmApp {
         Self {
             manager,
             show_flag,
-            show_main_window: true,
+            show_main_window: !start_hidden,
+            hide_main_window: start_hidden,
             tray_icon,
+            tray_visible: true,
+            was_minimized: false,
             selected_nav: NavCategory::AllDownloads,
             categories_visible: true,
             search_query: String::new(),
@@ -785,6 +812,13 @@ impl DmApp {
             browser_pending: VecDeque::new(),
             browser_last_error: String::new(),
             last_main_window_save: Instant::now() - Duration::from_secs(5),
+            last_show_poll: Instant::now() - Duration::from_secs(5),
+            busy_frames: {
+                let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                crate::browser::spawn_busy_waker(Arc::clone(&busy), Arc::clone(&minimize_watch));
+                busy
+            },
+            minimize_watch,
             column_widths,
             column_visible,
         }
@@ -1873,25 +1907,100 @@ impl DmApp {
 // ---------------------------------------------------------------------------
 impl eframe::App for DmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // A browser-launched instance must not show the main window. eframe
+        // flips the window visible right after the first frame, so hide it
+        // again in that same frame (commands are applied before the event
+        // loop returns, so there is no visible flash).
+        if std::mem::take(&mut self.hide_main_window) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
         // Remember where the main window is (honours the setting).
         self.track_main_window(ctx);
 
-        // Handle background tray icon click
-        if let Ok(mut flag) = self.show_flag.lock() {
-            if *flag {
-                self.show_main_window = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                *flag = false;
+        // Window behaviour: tray icon and the configured minimize action.
+        let minimize_mode = {
+            let mode = self.manager.lock_ui().settings.minimize_mode.clone();
+            normalize_minimize_mode(&mode)
+        };
+        // Without a tray icon the tray modes would strand the window, so
+        // fall back to a plain taskbar minimize.
+        let effective_mode = if self.tray_icon.is_some() {
+            minimize_mode
+        } else {
+            "taskbar"
+        };
+        // The waker delivers the frame that notices a minimize; eframe cannot
+        // schedule one by itself for an iconic window.
+        self.minimize_watch.store(
+            effective_mode == "tray" && self.show_main_window,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        // Showing from the tray (left/double click or the menu item), or
+        // when a second launch asks this instance to surface.
+        let mut show_requested = self
+            .show_flag
+            .lock()
+            .map(|mut flag| std::mem::take(&mut *flag))
+            .unwrap_or(false);
+        if !show_requested && self.last_show_poll.elapsed() > Duration::from_millis(300) {
+            self.last_show_poll = Instant::now();
+            let path = show_request_path();
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+                show_requested = true;
             }
+        }
+        if show_requested {
+            self.show_main_window = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            crate::logfile::log("TRAY", "main window restored from the tray");
         }
 
-        // Minimize to tray on close if user wants to keep running
-        if ctx.input(|i| i.viewport().close_requested()) {
-            if self.show_main_window {
-                self.show_main_window = false;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            }
+        // Close button: hide to the tray when one exists, otherwise quit.
+        if ctx.input(|i| i.viewport().close_requested()) && effective_mode != "taskbar" {
+            self.show_main_window = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            crate::logfile::log("TRAY", "close button hid the main window to the tray");
         }
+
+        // Minimize button: tray-only hides the window (and with it the
+        // taskbar button). The other modes keep normal taskbar behaviour.
+        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        if minimized && !self.was_minimized && self.show_main_window && effective_mode == "tray" {
+            self.show_main_window = false;
+            // Un-minimize before hiding: eframe refuses to schedule frames
+            // for iconic windows, and a hidden *restored* window keeps
+            // painting the child progress windows.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            crate::logfile::log("TRAY", "minimize button hid the main window to the tray");
+        }
+        self.was_minimized = minimized && self.show_main_window;
+
+        // The tray icon is present for both tray modes and whenever the
+        // main window is hidden; "taskbar" mode keeps it out of the tray.
+        let want_tray = !self.show_main_window || effective_mode != "taskbar";
+        if self.tray_visible != want_tray {
+            if let Some(tray) = &self.tray_icon {
+                if let Err(error) = tray.set_visible(want_tray) {
+                    crate::logfile::log(
+                        "TRAY",
+                        &format!("could not change tray icon visibility: {error}"),
+                    );
+                }
+            }
+            self.tray_visible = want_tray;
+        }
+
+        // A hidden window receives no paint from Windows, so scheduled
+        // repaints cannot run there; `browser::spawn_busy_waker` posts a slow
+        // synthetic resize to keep the tray click and a second-instance
+        // request observable.
 
         // Reap finished tasks periodically; active transfers keep the UI
         // repainting frequently enough for progress to look continuous.
@@ -1920,6 +2029,21 @@ impl eframe::App for DmApp {
         apply_app_style(ctx);
 
         self.poll_browser_pending(ctx);
+
+        // Immediate viewports (progress windows, dialogs) are painted by the
+        // parent window's frame. eframe does not schedule frames for a
+        // minimized window, so keep nudging the event loop while there is
+        // something to animate. See `browser::spawn_busy_waker`.
+        let child_window_open = !self.active_details_popouts.is_empty()
+            || self.add_dialog.open
+            || self.settings_dialog.open
+            || self.scheduler_dialog.open
+            || self.grabber_dialog.running
+            || self.about_open;
+        self.busy_frames.store(
+            self.manager.active_count() > 0 || child_window_open,
+            Ordering::Relaxed,
+        );
         // Clipboard watcher: when enabled, copying a download link opens
         // the Add-URL window and remains active while the app is idle.
         if settings_snapshot.monitor_clipboard {
@@ -2876,10 +3000,24 @@ impl eframe::App for DmApp {
                 self.manager
                     .quota
                     .update_config(new_settings.quota.clone());
+                let auto_startup = new_settings.auto_startup;
                 let mut st = self.manager.lock_ui();
                 st.settings = new_settings;
                 let _ = st.save();
-                self.status_bar = "Settings saved.".into();
+                drop(st);
+                match crate::startup::sync(auto_startup) {
+                    Ok(()) => {
+                        self.status_bar = "Settings saved.".into();
+                    }
+                    Err(error) => {
+                        crate::logfile::log(
+                            "STARTUP",
+                            &format!("could not update the launch at startup entry: {error}"),
+                        );
+                        self.status_bar =
+                            format!("Settings saved, but the startup entry failed: {error}");
+                    }
+                }
             }
             if let Some(webhooks) = outcome.webhooks {
                 let mut st = self.manager.lock_ui();
@@ -2996,6 +3134,10 @@ impl DmApp {
     /// A maximized/minimized window is ignored: restoring the *normal*
     /// rectangle is what users expect, not the parked one.
     fn track_main_window(&mut self, ctx: &egui::Context) {
+        // A hidden (tray) window has no meaningful on-screen rectangle.
+        if !self.show_main_window {
+            return;
+        }
         let (outer, inner, maximized, minimized) = ctx.input(|i| {
             let viewport = i.viewport();
             (
@@ -4426,6 +4568,16 @@ fn parse_optional_hm(input: &str) -> Result<Option<(u32, u32)>, String> {
     Ok(Some((hour, minute)))
 }
 
+/// Normalise the store's minimize-mode string. Unknown values (older state
+/// files, hand edits) fall back to the IDM-like "taskbar + tray" behaviour.
+fn normalize_minimize_mode(mode: &str) -> &'static str {
+    match mode {
+        "taskbar" => "taskbar",
+        "tray" => "tray",
+        _ => "taskbar_tray",
+    }
+}
+
 fn ui_accent(name: &str) -> Color32 {
     if name == "blue" || name.is_empty() {
         return ACCENT_BLUE;
@@ -4494,19 +4646,39 @@ fn create_tray_icon(show_flag: Arc<Mutex<bool>>) -> Result<tray_icon::TrayIcon> 
         .with_icon(icon)
         .with_tooltip("DM Ultra")
         .build()?;
+    crate::logfile::log("TRAY", "tray icon created");
 
     let show_id = show_item.id().clone();
     let quit_id = quit_item.id().clone();
 
+    let menu_flag = show_flag.clone();
     std::thread::spawn(move || {
         let receiver = tray_icon::menu::MenuEvent::receiver();
         while let Ok(event) = receiver.recv() {
             if event.id == show_id {
+                if let Ok(mut flag) = menu_flag.lock() {
+                    *flag = true;
+                }
+                crate::browser::wake_main_window();
+            } else if event.id == quit_id {
+                std::process::exit(0);
+            }
+        }
+    });
+
+    // A left click (or double click) on the icon itself restores the main
+    // window, the way IDM does; the menu remains available on right click.
+    std::thread::spawn(move || {
+        let receiver = tray_icon::TrayIconEvent::receiver();
+        while let Ok(event) = receiver.recv() {
+            if matches!(
+                event.click_type,
+                tray_icon::ClickType::Left | tray_icon::ClickType::Double
+            ) {
                 if let Ok(mut flag) = show_flag.lock() {
                     *flag = true;
                 }
-            } else if event.id == quit_id {
-                std::process::exit(0);
+                crate::browser::wake_main_window();
             }
         }
     });
@@ -4574,7 +4746,31 @@ fn window_icon() -> Arc<egui::IconData> {
     })
 }
 
-pub fn launch(manager: Arc<Manager>) -> Result<()> {
+/// Marker file used to ask the running instance to show its main window.
+/// A second `dmultra.exe` launch writes it and exits instead of starting a
+/// duplicate GUI (two instances would fight over state.json).
+fn show_request_path() -> std::path::PathBuf {
+    crate::state::state_dir().join("show.request")
+}
+
+/// Ask an already-running instance to reveal its main window.
+pub fn request_show() {
+    let path = show_request_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, b"1");
+}
+
+/// Start the GUI.
+///
+/// `start_hidden` is used when the browser launches DM Ultra to service a
+/// download link: the main window must not pop up, only the download
+/// status window (and the tray icon) should appear.
+pub fn launch(manager: Arc<Manager>, start_hidden: bool) -> Result<()> {
+    // A request left behind by a previous (crashed) instance must not
+    // pop the window open on this launch.
+    let _ = std::fs::remove_file(show_request_path());
     let title = format!("DM Ultra v{}", APP_VERSION.trim());
     const DEFAULT_INNER: [f32; 2] = [900.0, 566.0];
     const MIN_INNER: [f32; 2] = [720.0, 480.0];
@@ -4614,6 +4810,10 @@ pub fn launch(manager: Arc<Manager>) -> Result<()> {
         .with_inner_size(inner_size)
         .with_min_inner_size(MIN_INNER)
         .with_title(title.clone())
+        // eframe forces the window visible after its first frame, so the
+        // app also sends `ViewportCommand::Visible(false)` below when this
+        // is a browser-launched (background) instance.
+        .with_visible(!start_hidden)
         .with_icon(window_icon());
     if let Some(pos) = initial_pos {
         viewport = viewport.with_position(pos);
@@ -4624,7 +4824,7 @@ pub fn launch(manager: Arc<Manager>) -> Result<()> {
         ..Default::default()
     };
 
-    let app = DmApp::new(manager);
+    let app = DmApp::new(manager, start_hidden);
     // Browser clicks must be picked up even while the window is minimized:
     // the watcher nudges the (otherwise idle) event loop. See browser.rs.
     crate::browser::spawn_pending_waker();

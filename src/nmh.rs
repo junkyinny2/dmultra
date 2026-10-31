@@ -86,6 +86,7 @@ fn ensure_gui_running() {
     let spawn = {
         use std::os::windows::process::CommandExt;
         std::process::Command::new(&exe)
+            .arg("--background")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -95,6 +96,7 @@ fn ensure_gui_running() {
     };
     #[cfg(not(windows))]
     let spawn = std::process::Command::new(&exe)
+        .arg("--background")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

@@ -837,7 +837,7 @@ pub fn spawn_pending_waker() {
             let Some(hwnd) = wakeup::main_window() else {
                 continue;
             };
-            if unsafe { wakeup::IsIconic(hwnd) } != 0 {
+            if wakeup::needs_wake(hwnd) {
                 wakeup::post_resize(hwnd);
             }
         });
@@ -845,6 +845,101 @@ pub fn spawn_pending_waker() {
 
 #[cfg(not(windows))]
 pub fn spawn_pending_waker() {}
+
+/// Keep the GUI able to paint while the main window is minimized or hidden.
+///
+/// Immediate viewports (the progress window, dialogs) are rendered as part
+/// of the *parent* window's frame; eframe skips frame scheduling for
+/// minimized windows, so a progress window opened from the tray would show
+/// its first frame (0%) and then freeze even though the download keeps
+/// running. While `busy` is set, post a synthetic `WM_SIZE` so winit keeps
+/// producing frames. See [`wakeup::post_resize`].
+///
+/// The same thread also implements "minimize to tray only": Windows reports
+/// a minimize as a zero-sized resize, and eframe drops those, so the app
+/// never gets a frame to notice the iconified state. While `watch_minimize`
+/// is set (tray-only mode with the window still shown) it wakes the app so
+/// the frame can un-minimize and hide the window.
+///
+/// Finally, a hidden window is not minimized, but Windows still delivers no
+/// paint there, so eframe's scheduled repaints never run. A slow pulse keeps
+/// such a window alive for the scheduler, the clipboard monitor, a tray click
+/// and a second-instance show request.
+#[cfg(windows)]
+pub fn spawn_busy_waker(
+    busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    watch_minimize: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    let mut last_idle_wake = std::time::Instant::now();
+    let _ = std::thread::Builder::new()
+        .name("busy-waker".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let busy_now = busy.load(Ordering::Relaxed);
+            let watch = watch_minimize.load(Ordering::Relaxed);
+            let Some(hwnd) = wakeup::main_window() else {
+                continue;
+            };
+            if busy_now && wakeup::needs_wake(hwnd) {
+                wakeup::post_resize(hwnd);
+                last_idle_wake = std::time::Instant::now();
+            } else if watch && wakeup::is_iconic(hwnd) {
+                wakeup::post_resize(hwnd);
+                last_idle_wake = std::time::Instant::now();
+            } else if wakeup::needs_wake(hwnd)
+                && last_idle_wake.elapsed() >= std::time::Duration::from_millis(500)
+            {
+                wakeup::post_resize(hwnd);
+                last_idle_wake = std::time::Instant::now();
+            }
+        });
+}
+
+#[cfg(not(windows))]
+pub fn spawn_busy_waker(
+    _busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _watch_minimize: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+}
+
+/// Handle of a running DM Ultra main window (in any process), if one
+/// exists. Used to avoid starting a second GUI instance.
+#[cfg(windows)]
+pub fn gui_window_handle() -> Option<isize> {
+    wakeup::gui_window()
+}
+
+#[cfg(not(windows))]
+pub fn gui_window_handle() -> Option<isize> {
+    None
+}
+
+/// Wake a hidden or minimized DM Ultra window so it runs a frame now.
+///
+/// Tray clicks and a second-instance show request only set flags that are
+/// read inside a frame, and Windows delivers no paint to a hidden window;
+/// posting `WM_SIZE` is what makes winit/eframe produce that frame.
+#[cfg(windows)]
+pub fn wake_window(hwnd: isize) {
+    if wakeup::needs_wake(hwnd) {
+        wakeup::post_resize(hwnd);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn wake_window(_hwnd: isize) {}
+
+/// Wake this process' main window (used by the tray listeners).
+#[cfg(windows)]
+pub fn wake_main_window() {
+    if let Some(hwnd) = wakeup::main_window() {
+        wake_window(hwnd);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn wake_main_window() {}
 
 #[cfg(windows)]
 mod wakeup {
@@ -889,6 +984,7 @@ mod wakeup {
         fn GetWindowTextW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
         fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
         pub(super) fn IsIconic(hwnd: isize) -> c_int;
+        pub(super) fn IsWindowVisible(hwnd: isize) -> c_int;
         fn GetWindowPlacement(hwnd: isize, placement: *mut WindowPlacement) -> c_int;
         fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> c_int;
     }
@@ -922,6 +1018,41 @@ mod wakeup {
             EnumWindows(find_main, &mut found as *mut isize as isize);
         }
         (found != 0).then_some(found)
+    }
+
+    extern "system" fn find_gui(hwnd: isize, found: isize) -> i32 {
+        let mut buf = [0u16; 256];
+        let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+        if len > 0 {
+            let title = String::from_utf16_lossy(&buf[..len as usize]);
+            if title == "DM Ultra" || title.starts_with("DM Ultra v") {
+                unsafe {
+                    *(found as *mut isize) = hwnd;
+                }
+                return 0;
+            }
+        }
+        1
+    }
+
+    /// HWND of any running DM Ultra main window (any process).
+    pub(super) fn gui_window() -> Option<isize> {
+        let mut found: isize = 0;
+        unsafe {
+            EnumWindows(find_gui, &mut found as *mut isize as isize);
+        }
+        (found != 0).then_some(found)
+    }
+
+    /// True when the window is minimized or hidden (tray-only mode or a
+    /// browser-launched background instance).
+    pub(super) fn needs_wake(hwnd: isize) -> bool {
+        unsafe { IsIconic(hwnd) != 0 || IsWindowVisible(hwnd) == 0 }
+    }
+
+    /// True when the window is iconic (minimized to the taskbar).
+    pub(super) fn is_iconic(hwnd: isize) -> bool {
+        unsafe { IsIconic(hwnd) != 0 }
     }
 
     /// Ask winit/eframe for one frame without changing the real window size.

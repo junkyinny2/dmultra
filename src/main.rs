@@ -28,6 +28,7 @@ mod options;
 mod postdownload;
 mod queue;
 mod rtsp;
+mod startup;
 mod state;
 mod ui;
 
@@ -49,6 +50,10 @@ use crate::engine::Outcome;
     long_about = None
 )]
 struct Cli {
+    /// Start with the main window hidden (in the tray). Used when the
+    /// browser launches DM Ultra just to start a download.
+    #[arg(long)]
+    background: bool,
     /// With no subcommand the GUI launches (double-click friendly).
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -427,6 +432,33 @@ fn main() -> Result<()> {
     let settings_snapshot = rt.block_on(async { st.lock().await.settings.clone() });
     logfile::init(settings_snapshot.log_to_file);
     logfile::log("APP", &format!("DM Ultra {} starting", env!("CARGO_PKG_VERSION")));
+    // Keep the HKCU Run entry in step with the saved option (and repair it
+    // if the program was moved). Failures are logged, never fatal: a locked
+    // registry must not stop downloads.
+    match startup::sync(settings_snapshot.auto_startup) {
+        Ok(()) => logfile::log(
+            "STARTUP",
+            if settings_snapshot.auto_startup {
+                "launch at startup entry enabled"
+            } else {
+                "launch at startup entry removed"
+            },
+        ),
+        Err(error) => logfile::log(
+            "STARTUP",
+            &format!("could not update the launch at startup entry: {error}"),
+        ),
+    }
+    if settings_snapshot.auto_startup && !startup::is_current() {
+        logfile::log(
+            "STARTUP",
+            &format!(
+                "launch at startup entry points elsewhere: {:?}",
+                startup::registered_command()
+            ),
+        );
+    }
+    let start_hidden = cli.background;
     let limiter = limiter::SpeedLimiter::new(
         settings_snapshot.use_speed_limiter,
         settings_snapshot.speed_limit_bps,
@@ -445,10 +477,32 @@ fn main() -> Result<()> {
                 }
                 FreeConsole();
             }
+            // One GUI at a time: two instances would fight over state.json.
+            // A normal launch surfaces the existing window; a browser or
+            // startup launch just leaves its queued link for that instance.
+            if let Some(hwnd) = browser::gui_window_handle() {
+                if start_hidden {
+                    logfile::log(
+                        "APP",
+                        "another instance is already running; queued request left for it",
+                    );
+                } else {
+                    gui::request_show();
+                    // The running instance is hidden, so it will not run a
+                    // frame on its own; wake it so the request is applied
+                    // immediately instead of after the slow idle pulse.
+                    browser::wake_window(hwnd);
+                    logfile::log(
+                        "APP",
+                        "another instance is already running; asked it to show its window",
+                    );
+                }
+                return Ok(());
+            }
             // The GUI hosts the engine itself (single process).
             let quota = limiter::QuotaTracker::new(quota_cfg);
             let manager = manager::Manager::new(st, limiter, quota);
-            gui::launch(manager)
+            gui::launch(manager, start_hidden)
         }
         Some(Cmd::Browser { uninstall }) => {
             if uninstall {
@@ -773,6 +827,8 @@ async fn run_cmd(st: Arc<Mutex<State>>, limiter: Arc<limiter::SpeedLimiter>, cmd
                     println!("file-types       {}", s.settings.file_types);
                     println!("user-agent       {}", s.settings.user_agent);
                     println!("monitor-clipboard {}", s.settings.monitor_clipboard);
+                    println!("auto-startup     {}", s.settings.auto_startup);
+                    println!("minimize-mode    {}", s.settings.minimize_mode);
                 }
                 (Some(k), Some(v)) => match k {
                     "max-connections" => {
@@ -785,6 +841,17 @@ async fn run_cmd(st: Arc<Mutex<State>>, limiter: Arc<limiter::SpeedLimiter>, cmd
                     "file-types" => s.settings.file_types = v,
                     "user-agent" => s.settings.user_agent = v,
                     "monitor-clipboard" => s.settings.monitor_clipboard = v == "1" || v.eq_ignore_ascii_case("true"),
+                    "auto-startup" => {
+                        s.settings.auto_startup = v == "1" || v.eq_ignore_ascii_case("true");
+                        startup::sync(s.settings.auto_startup)?;
+                    }
+                    "minimize-mode" => {
+                        let mode = v.to_ascii_lowercase();
+                        if !matches!(mode.as_str(), "taskbar" | "taskbar_tray" | "tray") {
+                            return Err(anyhow!("minimize-mode must be taskbar, taskbar_tray or tray"));
+                        }
+                        s.settings.minimize_mode = mode;
+                    }
                     _ => return Err(anyhow!("unknown setting {k:?}")),
                 },
                 (Some(k), None) => return Err(anyhow!("missing value for {k:?}")),

@@ -300,6 +300,8 @@ pub struct Settings {
     pub language: String,
     /// Launch at system startup (HKCU Run entry).
     pub auto_startup: bool,
+    /// Minimize behaviour: `taskbar` | `taskbar_tray` | `tray`.
+    pub minimize_mode: String,
     /// Probe extensionless clipboard links with a HEAD request.
     pub clipboard_probe: bool,
     /// Extra clipboard-watched extensions (comma/space separated).
@@ -500,6 +502,7 @@ impl Default for Settings {
             font_size: 13.0,
             language: "system".into(),
             auto_startup: false,
+            minimize_mode: "taskbar_tray".into(),
             clipboard_probe: false,
             clipboard_extensions: String::new(),
             keep_awake: false,
