@@ -71,3 +71,10 @@
   being downloaded in a burst on the next launch.
 - `dmultra-nmh` now starts DM Ultra when it is not running, so a click is
   not silently lost.
+
+## v0.043 (built, not published)
+- Fixed browser clicks still opening the Add-URL window: the old
+  `browser_auto_download` flag had the opposite meaning and was carried
+  over by a serde alias. The alias is gone and the option is now
+  "Ask before downloading browser links" (default off).
+- Logged when a capture opens File Info, to make this diagnosable.

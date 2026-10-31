@@ -829,6 +829,10 @@ impl DmApp {
             self.add_dialog.url = url;
             self.add_dialog.referer = (!referer.trim().is_empty()).then_some(referer);
             self.status_bar = "Browser download link received.".into();
+            crate::logfile::log(
+                "BROWSER",
+                "capture opened File Info (\"Show File Info for browser downloads\" is enabled)",
+            );
             return;
         }
         self.prepare_add_url();

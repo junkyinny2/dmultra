@@ -2161,7 +2161,7 @@ impl SettingsDialog {
                             }
                         }
                     });
-                    srow!(self, ui, pal, first, drawn, hit, "Show File Info for browser downloads", "Show the File Info window when a browser link is captured. When off, clicking a link starts the download immediately and only the progress window opens.", |ui| {
+                    srow!(self, ui, pal, first, drawn, hit, "Ask before downloading browser links", "Show the File Info window instead of starting a browser-captured link immediately. Leave this off to download on click and only show the progress window.", |ui| {
                         if toggle(ui, pal, &mut self.draft.browser_show_file_info).clicked() {
                             self.set_dirty();
                         }

@@ -364,7 +364,11 @@ pub struct Settings {
     /// Show the File Info (Add URL) window for browser link clicks instead
     /// of starting the download straight away. Off by default: a browser
     /// click starts downloading and only the progress window appears.
-    #[serde(default, alias = "browser_auto_download")]
+    ///
+    /// Deliberately *not* aliased onto the old `browser_auto_download`
+    /// field: that flag meant "start immediately" and carried the opposite
+    /// meaning, so inheriting it brought the dialog back for existing users.
+    #[serde(default)]
     pub browser_show_file_info: bool,
     /// Play a system sound when a download completes (IDM "Sounds").
     pub play_completion_sound: bool,
