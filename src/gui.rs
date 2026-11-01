@@ -343,6 +343,55 @@ fn centered_on_main_pos(
     ))
 }
 
+#[cfg(target_os = "windows")]
+fn adjacent_progress_pos(
+    ctx: &egui::Context,
+    outer_size: [f32; 2],
+    cascade_index: usize,
+) -> Option<egui::Pos2> {
+    let (main_left, main_top, main_right, _) = native_win::window_rect("DM Ultra")?;
+    let area = native_win::work_area()?;
+    let scale = ctx.pixels_per_point();
+    let to_logical = |value: i32| value as f32 / scale;
+    let (area_left, area_top, area_right, area_bottom) = (
+        to_logical(area.left),
+        to_logical(area.top),
+        to_logical(area.right),
+        to_logical(area.bottom),
+    );
+    let (main_left, main_top, main_right) = (
+        to_logical(main_left),
+        to_logical(main_top),
+        to_logical(main_right),
+    );
+    let right_x = main_right + 8.0;
+    let left_x = main_left - outer_size[0] - 8.0;
+    let right_space = area_right - right_x;
+    let left_space = left_x - area_left;
+    let max_x = (area_right - outer_size[0]).max(area_left);
+    let x = if right_space >= outer_size[0] {
+        right_x
+    } else if left_space >= 0.0 {
+        left_x
+    } else if right_space >= left_space {
+        right_x.clamp(area_left, max_x)
+    } else {
+        left_x.clamp(area_left, max_x)
+    };
+    let max_y = (area_bottom - outer_size[1]).max(area_top);
+    let y = (main_top + cascade_index as f32 * 28.0).clamp(area_top, max_y);
+    Some(egui::pos2(x, y))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn adjacent_progress_pos(
+    _ctx: &egui::Context,
+    _outer_size: [f32; 2],
+    _cascade_index: usize,
+) -> Option<egui::Pos2> {
+    None
+}
+
 /// Width/height a native window frame adds around a winit client area
 /// (8 px border each side, 39 px caption). Used to turn an inner size into
 /// the OUTER size `with_position` works in.
@@ -368,7 +417,7 @@ const COLUMN_LABELS: [&str; 8] = [
     "File Name", "Queue", "Size", "Status", "Time left", "Transfer rate", "Last Try",
     "Description",
 ];
-const DEFAULT_COLUMN_WIDTHS: [f32; 8] = [320.0, 80.0, 90.0, 100.0, 90.0, 115.0, 115.0, 200.0];
+const DEFAULT_COLUMN_WIDTHS: [f32; 8] = [175.0, 56.0, 70.0, 72.0, 64.0, 78.0, 78.0, 100.0];
 const MIN_COLUMN_WIDTHS: [f32; 8] = [120.0, 56.0, 70.0, 72.0, 64.0, 78.0, 78.0, 100.0];
 const MAX_COLUMN_WIDTH: f32 = 1600.0;
 const COLUMN_RESIZE_HIT_WIDTH: f32 = 8.0;
@@ -2044,11 +2093,9 @@ impl eframe::App for DmApp {
             self.manager.active_count() > 0 || child_window_open,
             Ordering::Relaxed,
         );
-        // Keep repainting while a dialog is open so its close button and
-        // title-bar X take effect within a frame instead of waiting for
-        // user input (immediate viewports are driven by the parent frame).
+        // Immediate viewports are driven by the parent frame. A timed repaint
+        // keeps them responsive without spinning the GUI thread continuously.
         if child_window_open {
-            ctx.request_repaint();
             ctx.request_repaint_after(Duration::from_millis(50));
         }
         // Clipboard watcher: when enabled, copying a download link opens
@@ -2079,6 +2126,7 @@ impl eframe::App for DmApp {
                         if let Ok(data) = std::fs::read_to_string(&overlay_path) {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
                                 let url = v.get("url").and_then(|s| s.as_str()).unwrap_or("");
+                                let referer = v.get("referer").and_then(|s| s.as_str()).unwrap_or("");
                                 let title = v.get("title").and_then(|s| s.as_str()).unwrap_or("");
                                 let format = v.get("format").and_then(|s| s.as_str()).unwrap_or("");
                                 let x = v.get("x").and_then(|n| n.as_i64()).unwrap_or(0) as i32;
@@ -2095,7 +2143,9 @@ impl eframe::App for DmApp {
                                         }
                                     }
                                 }
-                                crate::overlay::update_overlay(url, title, format, qualities, x, y, w, h);
+                                crate::overlay::update_overlay(
+                                    url, referer, title, format, qualities, x, y, w, h,
+                                );
                                 fed = true;
                             }
                         }
@@ -2273,7 +2323,7 @@ impl eframe::App for DmApp {
             .show(ctx, |ui| {
                 // Twelve command buttons share one compact left-aligned row,
                 // split into command groups by two hairline separators.
-                let button_w = ((ui.available_width() - 28.0) / 12.0).clamp(56.0, 72.0);
+                let button_w = ((ui.available_width() - 72.0) / 12.0).clamp(56.0, 72.0);
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
 
                 ui.horizontal_centered(|ui| {
@@ -2728,23 +2778,24 @@ impl eframe::App for DmApp {
                 self.sort_items(&mut items);
 
                 if items.is_empty() {
-                    // Empty state centred inside the download-list body, not
-                    // the whole window (the sidebar must not affect it).
-                    let block_height = 46.0;
-                    let top_gap = ((ui.available_height() - block_height) * 0.5).max(0.0);
-                    ui.add_space(top_gap);
-                    ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("No downloads").size(18.0).color(text_empty_title()));
-                        ui.add_space(5.0);
-                        let subtitle = if query.is_empty() {
-                            "Click Add URL on the toolbar to start downloading."
-                        } else {
-                            "No downloads match your search."
-                        };
-                        ui.label(RichText::new(subtitle).size(13.0).color(text_empty_sub()));
+                    let visible_rect = ui.clip_rect();
+                    ui.allocate_ui_at_rect(visible_rect, |ui| {
+                        let block_height = 46.0;
+                        let top_gap = ((ui.available_height() - block_height) * 0.5).max(0.0);
+                        ui.add_space(top_gap);
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new("No downloads").size(18.0).color(text_empty_title()));
+                            ui.add_space(5.0);
+                            let subtitle = if query.is_empty() {
+                                "Click Add URL on the toolbar to start downloading."
+                            } else {
+                                "No downloads match your search."
+                            };
+                            ui.label(RichText::new(subtitle).size(13.0).color(text_empty_sub()));
+                        });
                     });
                 } else {
-                    egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                    egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
                         // Flush rows so the horizontal rules connect into a grid.
                         ui.spacing_mut().item_spacing.y = 0.0;
                         for (row_idx, d) in items.iter().enumerate() {
@@ -3933,7 +3984,29 @@ impl DmApp {
             // to is reused for the next download, instead of reverting to the
             // centred default for every new download id.
             let key = "dl-progress".to_string();
-            let initial_pos = self.saved_position(ctx, &key, [500.0, 360.0]);
+            let cascade_index = self
+                .active_details_popouts
+                .iter()
+                .position(|&open_id| open_id == id)
+                .unwrap_or(0);
+            let saved_pos = {
+                let st = self.manager.lock_ui();
+                st.settings
+                    .remember_window_pos
+                    .then(|| st.settings.window_positions.get(&key).copied())
+                    .flatten()
+            };
+            let initial_pos = if let Some([x, y]) = saved_pos {
+                egui::pos2(x, y + cascade_index as f32 * 28.0)
+            } else {
+                let outer_size = [
+                    500.0 + POPOUT_CHROME_W,
+                    360.0 + POPOUT_CHROME_H,
+                ];
+                adjacent_progress_pos(ctx, outer_size, cascade_index)
+                    .or_else(|| centered_popup_pos(ctx, outer_size))
+                    .unwrap_or_else(|| egui::pos2(120.0, 120.0))
+            };
 
             ctx.show_viewport_immediate(
                 viewport_id,
@@ -4709,35 +4782,8 @@ fn create_tray_icon(show_flag: Arc<Mutex<bool>>) -> Result<tray_icon::TrayIcon> 
 }
 
 fn generate_tray_icon() -> Result<TrayIcon> {
-    const S: u32 = 64;
-    let mut rgba = vec![0u8; (S * S * 4) as usize];
-    for y in 0..S {
-        for x in 0..S {
-            let fx = x as f32 + 0.5;
-            let fy = y as f32 + 0.5;
-            let dx = (fx - 32.0).abs();
-            let dy = (fy - 32.0).abs();
-            let mut c = [0u8, 0, 0, 0];
-            if dx <= 28.0 && dy <= 28.0 && (dx <= 22.0 || dy <= 22.0) {
-                c = [37, 131, 247, 255]; // Blue
-            }
-            let bolt = |px: f32, py: f32| -> bool {
-                let in_head = px >= 26.0 && px <= 38.0 && py >= 8.0 && py <= 24.0 && (px - 32.0).abs() <= (py - 8.0) * 0.8;
-                let in_mid = px >= 20.0 && px <= 38.0 && py >= 24.0 && py <= 30.0;
-                let in_tail = px >= 20.0 && px <= 34.0 && py >= 30.0 && py <= 56.0 && (px - 27.0).abs() <= (56.0 - py) * 0.55 + 1.2;
-                in_head || in_mid || in_tail
-            };
-            if bolt(fx, fy) {
-                c = [255, 255, 255, 255];
-            }
-            let i = ((y * S + x) * 4) as usize;
-            rgba[i] = c[0];
-            rgba[i + 1] = c[1];
-            rgba[i + 2] = c[2];
-            rgba[i + 3] = c[3];
-        }
-    }
-    Ok(TrayIcon::from_rgba(rgba, S, S)?)
+    const SIZE: u32 = 64;
+    Ok(TrayIcon::from_rgba(application_icon_rgba(SIZE)?, SIZE, SIZE)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -4746,26 +4792,26 @@ fn generate_tray_icon() -> Result<TrayIcon> {
 
 /// Native title-bar icon.  Without this eframe falls back to its default
 /// egui logo, which is not the DM Ultra application icon.
-fn window_icon() -> Arc<egui::IconData> {
+fn application_icon_rgba(size: u32) -> Result<Vec<u8>> {
     const ICON_BYTES: &[u8] = include_bytes!("../assets/icons/icon.ico");
+    let decoder = image::codecs::ico::IcoDecoder::new(std::io::Cursor::new(ICON_BYTES))?;
+    let decoded = image::DynamicImage::from_decoder(decoder)?.to_rgba8();
+    let resized = image::imageops::resize(
+        &decoded,
+        size,
+        size,
+        image::imageops::FilterType::Lanczos3,
+    );
+    Ok(resized.into_raw())
+}
 
-    // `IcoDecoder::new` already selects the best (largest/highest-quality)
-    // entry inside the ICO, so a single decode is enough.  Ask for 64 px so
-    // the title bar has a crisp source at both 100% and 200% DPI.
-    let decoded = image::codecs::ico::IcoDecoder::new(std::io::Cursor::new(ICON_BYTES))
-        .ok()
-        .and_then(|decoder| image::DynamicImage::from_decoder(decoder).ok())
-        .map(|img| img.to_rgba8())
-        .unwrap_or_else(|| {
-            image::RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 0]))
-        });
-    let resized = image::imageops::resize(&decoded, 64, 64, image::imageops::FilterType::Lanczos3);
-
-    Arc::new(egui::IconData {
-        rgba: resized.into_raw(),
-        width: 64,
-        height: 64,
-    })
+fn window_icon() -> Result<Arc<egui::IconData>> {
+    const SIZE: u32 = 64;
+    Ok(Arc::new(egui::IconData {
+        rgba: application_icon_rgba(SIZE)?,
+        width: SIZE,
+        height: SIZE,
+    }))
 }
 
 /// Marker file used to ask the running instance to show its main window.
@@ -4794,8 +4840,8 @@ pub fn launch(manager: Arc<Manager>, start_hidden: bool) -> Result<()> {
     // pop the window open on this launch.
     let _ = std::fs::remove_file(show_request_path());
     let title = format!("DM Ultra v{}", APP_VERSION.trim());
-    const DEFAULT_INNER: [f32; 2] = [900.0, 566.0];
-    const MIN_INNER: [f32; 2] = [720.0, 480.0];
+    const DEFAULT_INNER: [f32; 2] = [840.0, 520.0];
+    const MIN_INNER: [f32; 2] = [640.0, 420.0];
 
     // Where the window opens:
     //   * "Remember window positions" on + a saved spot -> exactly there
@@ -4827,8 +4873,6 @@ pub fn launch(manager: Arc<Manager>, start_hidden: bool) -> Result<()> {
     };
 
     let mut viewport = ViewportBuilder::default()
-        // Outer window lands at roughly the 916 x 605 reference size once
-        // the native title bar and frame are added.
         .with_inner_size(inner_size)
         .with_min_inner_size(MIN_INNER)
         .with_title(title.clone())
@@ -4836,7 +4880,7 @@ pub fn launch(manager: Arc<Manager>, start_hidden: bool) -> Result<()> {
         // app also sends `ViewportCommand::Visible(false)` below when this
         // is a browser-launched (background) instance.
         .with_visible(!start_hidden)
-        .with_icon(window_icon());
+        .with_icon(window_icon()?);
     if let Some(pos) = initial_pos {
         viewport = viewport.with_position(pos);
     }
