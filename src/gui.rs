@@ -4052,10 +4052,9 @@ impl DmApp {
                 .round() as u64;
             let filename = d.save_path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
-            // A shared key so the last position a progress window was moved
-            // to is reused for the next download, instead of reverting to the
-            // centred default for every new download id.
-            let key = "dl-progress".to_string();
+            // A unique key per download ID so each progress window remembers
+            // its own position independently.
+            let key = format!("dl-progress-{}", id);
             let cascade_index = self
                 .active_details_popouts
                 .iter()
@@ -4069,7 +4068,7 @@ impl DmApp {
                     .flatten()
             };
             let initial_pos = if let Some([x, y]) = saved_pos {
-                egui::pos2(x, y + cascade_index as f32 * 28.0)
+                egui::pos2(x, y)
             } else {
                 let outer_size = [
                     500.0 + POPOUT_CHROME_W,
