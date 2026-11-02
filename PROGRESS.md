@@ -168,3 +168,21 @@
   being created.
 - Removed the FRAME/GL/HOOK timing instrumentation added while diagnosing
   the lag, and set `vsync: false` on the native options.
+
+## v0.065 (built, not published)
+- Fixed progress popouts going dead when the main window is hidden to the
+  tray. The busy flag that drives the synthetic-wake pulse was published
+  near the top of `update`, before the popouts were rendered, so a window
+  opened in that frame (or right after a transfer finished) could leave the
+  pulse off for the frame that mattered. The flag is now published at the
+  end of the frame, after every viewport is rendered, and each progress
+  popout also requests a 100 ms parent repaint while it is open.
+- The busy-waker thread now caches the main window handle and validates it
+  with `IsWindow` instead of running a full `EnumWindows` +
+  `GetWindowTextW` sweep every 100 ms. The sweep burned ~50% of a core and
+  could stall on foreign driver/IME windows, which delayed - or skipped -
+  the wake that makes popout clicks run while the main window is hidden.
+- Popout hook installation now scans this process' own top-level windows
+  and hooks every match, so two progress windows that share a title
+  (e.g. two downloads of `blob.bin`) both get the instant title-bar close.
+  `FindWindowW` only ever returned the first one.

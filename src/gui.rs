@@ -2088,25 +2088,10 @@ impl eframe::App for DmApp {
 
         self.poll_browser_pending(ctx);
 
-        // Immediate viewports (progress windows, dialogs) are painted by the
-        // parent window's frame. eframe does not schedule frames for a
-        // minimized window, so keep nudging the event loop while there is
-        // something to animate. See `browser::spawn_busy_waker`.
-        let child_window_open = !self.active_details_popouts.is_empty()
-            || self.add_dialog.open
-            || self.settings_dialog.open
-            || self.scheduler_dialog.open
-            || self.grabber_dialog.running
-            || self.about_open;
-        self.busy_frames.store(
-            self.manager.active_count() > 0 || child_window_open,
-            Ordering::Relaxed,
-        );
-        // Immediate viewports are driven by the parent frame. A timed repaint
-        // keeps them responsive without spinning the GUI thread continuously.
-        if child_window_open {
-            ctx.request_repaint_after(Duration::from_millis(50));
-        }
+        // The busy/child-window flag is published at the END of the frame,
+        // after every popout has been rendered (see below). Computing it here
+        // would miss a window opened during this frame, which is exactly when
+        // the wake pulse is needed most.
         // Clipboard watcher: when enabled, copying a download link opens
         // the Add-URL window and remains active while the app is idle.
         if settings_snapshot.monitor_clipboard {
@@ -3206,6 +3191,32 @@ impl eframe::App for DmApp {
             self.hook_pending = found < expected;
         }
 
+        // Immediate viewports (progress windows, dialogs) are painted by the
+        // parent window's frame. eframe does not schedule frames for a
+        // minimized or hidden window, so keep nudging the event loop while
+        // there is something to animate. This runs AFTER the popouts were
+        // rendered, so a window opened for the first time in this frame is
+        // covered immediately. See `browser::spawn_busy_waker`.
+        let child_window_open = !self.active_details_popouts.is_empty()
+            || self.add_dialog.open
+            || self.settings_dialog.open
+            || self.scheduler_dialog.open
+            || self.grabber_dialog.running
+            || self.about_open;
+        let busy_val = self.manager.active_count() > 0 || child_window_open;
+        self.busy_frames.store(busy_val, Ordering::Relaxed);
+        // Immediate viewports are driven by the parent frame. A timed repaint
+        // keeps them responsive without spinning the GUI thread continuously.
+        // A pending Win32 hook also needs another frame to attach to a window
+        // that did not exist yet.
+        if child_window_open || self.hook_pending {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        } else {
+            // Keep the event loop alive even when idle so the tray, clipboard
+            // monitor, and pending queue continue to work.
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+
         // Native window chrome (title bar, border, caption text) follows the
         // app theme. Done last so a popout created during THIS frame is
         // themed before it is composited - otherwise the OS shows its
@@ -4199,6 +4210,11 @@ impl DmApp {
         } else {
             close_requested = true;
         }
+
+        // The popout is painted by the root frame. Keep a light repaint pulse
+        // while it exists so a click is processed even if the main window is
+        // hidden to the tray (a hidden window gets no OS paint of its own).
+        ctx.request_repaint_after(Duration::from_millis(100));
 
         if close_requested {
             self.active_details_popouts.retain(|&pop_id| pop_id != id);

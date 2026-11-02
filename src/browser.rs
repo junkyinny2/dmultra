@@ -762,7 +762,7 @@ pub fn spawn_busy_waker(
     let _ = std::thread::Builder::new()
         .name("busy-waker".into())
         .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(150));
+            std::thread::sleep(std::time::Duration::from_millis(100));
             let busy_now = busy.load(Ordering::Relaxed);
             let watch = watch_minimize.load(Ordering::Relaxed);
             let Some(hwnd) = wakeup::main_window() else {
@@ -856,8 +856,8 @@ pub fn subclass_popups(_titles: &[String]) -> usize {
 mod wakeup {
     use std::collections::HashMap;
     use std::ffi::c_int;
+    use std::sync::atomic::{AtomicIsize, Ordering};
     use std::sync::{Mutex, OnceLock};
-    use std::time::Instant;
 
     #[repr(C)]
     #[derive(Default, Clone, Copy)]
@@ -905,8 +905,8 @@ mod wakeup {
         pub(super) fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
         fn GetWindowPlacement(hwnd: isize, placement: *mut WindowPlacement) -> c_int;
         fn DefWindowProcW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
-        fn FindWindowW(class: *const u16, title: *const u16) -> isize;
         fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> c_int;
+        fn IsWindow(hwnd: isize) -> c_int;
     }
 
     extern "system" fn find_main(hwnd: isize, found: isize) -> i32 {
@@ -932,12 +932,39 @@ mod wakeup {
     }
 
     /// HWND of this process' main window, if it exists.
+    ///
+    /// The handle is cached: the busy waker asks for it several times per
+    /// second, and a full `EnumWindows` + `GetWindowTextW` sweep is both
+    /// expensive and can block on foreign driver/IME windows. The cache is
+    /// validated with `IsWindow` and the owning process id.
     pub(super) fn main_window() -> Option<isize> {
+        static CACHED: AtomicIsize = AtomicIsize::new(0);
+        let cached = CACHED.load(Ordering::Relaxed);
+        if cached != 0 && is_our_window(cached) {
+            return Some(cached);
+        }
         let mut found: isize = 0;
         unsafe {
             EnumWindows(find_main, &mut found as *mut isize as isize);
         }
-        (found != 0).then_some(found)
+        if found != 0 {
+            CACHED.store(found, Ordering::Relaxed);
+            Some(found)
+        } else {
+            None
+        }
+    }
+
+    /// True when `hwnd` still belongs to this process.
+    fn is_our_window(hwnd: isize) -> bool {
+        if unsafe { IsWindow(hwnd) } == 0 {
+            return false;
+        }
+        let mut pid: u32 = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, &mut pid);
+        }
+        pid == std::process::id()
     }
 
     extern "system" fn find_gui(hwnd: isize, found: isize) -> i32 {
@@ -1032,36 +1059,73 @@ mod wakeup {
     /// the app drops the viewport as usual.
     ///
     /// `titles` are the exact titles of the popout windows that are currently
-    /// open. We look each one up directly with `FindWindowW` instead of
-    /// enumerating every top-level window: some driver/IME windows block
-    /// `GetWindowTextW` for ~100 ms each, which made enumeration unusably slow.
+    /// open. Only windows owned by this process are considered, and all of
+    /// them are hooked - several progress windows can legitimately share the
+    /// same title ("Download status - blob.bin"), and `FindWindowW` alone only
+    /// ever returns the first one, leaving the rest without an instant close.
     ///
     /// Returns how many of those windows currently exist, so the caller can
     /// retry while one is still being created.
     pub(super) fn subclass_popups(titles: &[String]) -> usize {
-        let mut found = 0usize;
-        for title in titles {
-            let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-            let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
-            if hwnd == 0 {
-                continue;
+        struct HookScan {
+            titles: *const String,
+            len: usize,
+            found: usize,
+        }
+
+        extern "system" fn hook_scan(hwnd: isize, lparam: isize) -> i32 {
+            let scan = unsafe { &mut *(lparam as *mut HookScan) };
+            let titles = unsafe { std::slice::from_raw_parts(scan.titles, scan.len) };
+            let mut pid: u32 = 0;
+            unsafe {
+                GetWindowThreadProcessId(hwnd, &mut pid);
             }
-            found += 1;
-            let known = hooked()
-                .lock()
-                .map(|map| map.contains_key(&hwnd))
-                .unwrap_or(true);
-            if known {
-                continue;
+            if pid != std::process::id() {
+                return 1;
             }
-            let previous = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_proc as isize) };
-            if previous != 0 {
-                if let Ok(mut map) = hooked().lock() {
-                    map.insert(hwnd, previous);
-                }
+            let mut buf = [0u16; 512];
+            let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+            if len <= 0 {
+                return 1;
+            }
+            let title = String::from_utf16_lossy(&buf[..len as usize]);
+            if !titles.iter().any(|wanted| wanted == &title) {
+                return 1;
+            }
+            scan.found += 1;
+            hook_window(hwnd);
+            1
+        }
+
+        if titles.is_empty() {
+            return 0;
+        }
+        let mut scan = HookScan {
+            titles: titles.as_ptr(),
+            len: titles.len(),
+            found: 0,
+        };
+        unsafe {
+            EnumWindows(hook_scan, &mut scan as *mut HookScan as isize);
+        }
+        scan.found
+    }
+
+    /// Install the instant-close subclass on one window (once).
+    fn hook_window(hwnd: isize) {
+        let known = hooked()
+            .lock()
+            .map(|map| map.contains_key(&hwnd))
+            .unwrap_or(true);
+        if known {
+            return;
+        }
+        let previous = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_proc as isize) };
+        if previous != 0 {
+            if let Ok(mut map) = hooked().lock() {
+                map.insert(hwnd, previous);
             }
         }
-        found
     }
 
     /// `GWLP_WNDPROC`: index of the window-procedure pointer.
