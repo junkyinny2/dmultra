@@ -663,6 +663,7 @@ impl PageId {
                 "Save each category to its own folder",
                 "Default Queue",
                 "Thread Count",
+                "Per-host connection limits",
                 "User Agent",
                 "Download Limit",
                 "Download Quota",
@@ -756,6 +757,7 @@ pub struct SettingsDialog {
     proxy_test_rx: Option<ProxyTest>,
     doctor: Vec<(bool, String)>,
     doctor_ran: bool,
+    host_limit_rows: Vec<(String, u32)>,
 }
 
 impl Default for SettingsDialog {
@@ -797,6 +799,7 @@ impl Default for SettingsDialog {
             proxy_test_rx: None,
             doctor: Vec::new(),
             doctor_ran: false,
+            host_limit_rows: Vec::new(),
         }
     }
 }
@@ -916,6 +919,12 @@ self.num.insert("refresh-secs", self.draft.refresh_address_secs.to_string());
         self.proxy_host = host;
         self.proxy_port = port;
         self.font_buf = format_size(self.draft.font_size);
+        self.host_limit_rows = self
+            .draft
+            .host_connection_limits
+            .iter()
+            .map(|(host, count)| (host.clone(), *count))
+            .collect();
     }
 
     fn palette(&self) -> ThemePalette {
@@ -965,6 +974,27 @@ self.num.insert("refresh-secs", self.draft.refresh_address_secs.to_string());
 
     fn set_dirty(&mut self) {
         self.dirty = true;
+    }
+
+    fn host_limit_rows_valid(&self) -> bool {
+        let mut hosts = std::collections::HashSet::new();
+        self.host_limit_rows.iter().all(|(host, _)| {
+            let host = host.trim();
+            if host.is_empty() {
+                return true;
+            }
+            normalize_host_limit_key(host).is_some_and(|key| hosts.insert(key))
+        })
+    }
+
+    fn sync_host_limits(&mut self) {
+        self.draft.host_connection_limits = self
+            .host_limit_rows
+            .iter()
+            .filter_map(|(host, count)| {
+                normalize_host_limit_key(host).map(|key| (key, (*count).clamp(1, 32)))
+            })
+            .collect();
     }
 
     fn write_proxy(&mut self) {
@@ -1019,7 +1049,12 @@ self.num.insert("refresh-secs", self.draft.refresh_address_secs.to_string());
             builder,
             |vctx, class| {
                 if vctx.input(|i| i.viewport().close_requested()) {
-                    keep_open = false;
+                    if self.host_limit_rows_valid() {
+                        keep_open = false;
+                    } else {
+                        self.toast("Correct or remove invalid host connection limits before closing.");
+                        vctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    }
                 }
                 match class {
                     egui::ViewportClass::Embedded => {
@@ -1126,7 +1161,10 @@ self.num.insert("refresh-secs", self.draft.refresh_address_secs.to_string());
                 ui.painter()
                     .hline(rect.x_range(), rect.top(), Stroke::new(1.0, pal.hairline));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("OK").clicked() {
+                    if ui
+                        .add_enabled(self.host_limit_rows_valid(), egui::Button::new("OK"))
+                        .clicked()
+                    {
                         self.set_dirty();
                         self.open = false;
                     }
@@ -1138,7 +1176,10 @@ self.num.insert("refresh-secs", self.draft.refresh_address_secs.to_string());
                         self.set_dirty(); // persist the revert
                         self.open = false;
                     }
-                    if ui.button("Apply").clicked() {
+                    if ui
+                        .add_enabled(self.host_limit_rows_valid(), egui::Button::new("Apply"))
+                        .clicked()
+                    {
                         self.set_dirty();
                         self.toast("Settings applied.");
                     }
@@ -1344,6 +1385,26 @@ fn parse_proxy_url(raw: &str) -> (String, String, String) {
         ),
         Err(_) => ("http".into(), raw.trim().to_string(), String::new()),
     }
+}
+
+fn normalize_host_limit_key(host: &str) -> Option<String> {
+    let host = host.trim();
+    if host.is_empty()
+        || host.contains("://")
+        || host.contains('/')
+        || host.contains('?')
+        || host.contains('#')
+        || host.contains('@')
+        || (!host.starts_with('[') && host.contains(':'))
+        || (host.starts_with('[') && host.contains("]:"))
+    {
+        return None;
+    }
+    let parsed = url::Url::parse(&format!("http://{host}")).ok()?;
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        return None;
+    }
+    parsed.host_str().map(|value| value.to_ascii_lowercase())
 }
 
 fn format_size(v: f32) -> String {
@@ -2708,6 +2769,7 @@ impl SettingsDialog {
                 hit,
                 &[
                     ("Thread Count", "Number of parallel connections per download."),
+                    ("Per-host connection limits", "Override the parallel connection count for specific hostnames."),
                     ("User Agent", "HTTP User-Agent sent by DM Ultra requests."),
                 ],
             ) {
@@ -2732,6 +2794,82 @@ impl SettingsDialog {
                             self.set_dirty();
                         }
                     });
+                });
+            }
+            let hit = self.section_hit("Per-host Connections", None);
+            if self.rows_hit(
+                hit,
+                &[(
+                    "Per-host connection limits",
+                    "Set a separate maximum number of parallel connections for an exact hostname.",
+                )],
+            ) {
+                section_card(ui, pal, Some(("Per-host Connections", None)), |ui, drawn| {
+                    *drawn = true;
+                    ui.label(
+                        RichText::new(
+                            "Overrides the global thread count for new downloads from these hosts.",
+                        )
+                        .font(ui_font(11.0, false))
+                        .color(pal.muted),
+                    );
+                    ui.add_space(6.0);
+                    let mut changed = false;
+                    let mut remove = None;
+                    egui::Grid::new("host-connection-limits")
+                        .num_columns(3)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            for label in ["Hostname", "Connections", ""] {
+                                ui.label(
+                                    RichText::new(label)
+                                        .font(ui_font(11.0, true))
+                                        .color(pal.muted),
+                                );
+                            }
+                            ui.end_row();
+                            for (index, (host, count)) in
+                                self.host_limit_rows.iter_mut().enumerate()
+                            {
+                                changed |= ui
+                                    .add_sized(
+                                        [180.0, 24.0],
+                                        egui::TextEdit::singleline(host)
+                                            .hint_text("example.com"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(egui::DragValue::new(count).clamp_range(1..=32))
+                                    .changed();
+                                if ui.small_button("Remove").clicked() {
+                                    remove = Some(index);
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    if let Some(index) = remove {
+                        self.host_limit_rows.remove(index);
+                        changed = true;
+                    }
+                    if button(ui, pal, "Add Host Limit", Btn::Secondary).clicked() {
+                        self.host_limit_rows
+                            .push((String::new(), self.draft.max_connections.clamp(1, 32)));
+                        changed = true;
+                    }
+                    if changed {
+                        self.sync_host_limits();
+                        self.set_dirty();
+                    }
+                    if !self.host_limit_rows_valid() {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(
+                                "Enter unique hostnames only (no scheme, path, or port).",
+                            )
+                            .font(ui_font(11.0, false))
+                            .color(pal.warning),
+                        );
+                    }
                 });
             }
             let hit = self.section_hit("Resume", None);
@@ -3326,5 +3464,32 @@ impl SettingsDialog {
                 });
             }
         }
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_host_limit_key, SettingsDialog};
+
+    #[test]
+    fn normalizes_exact_hostnames_and_rejects_urls() {
+        assert_eq!(
+            normalize_host_limit_key("  EXAMPLE.com "),
+            Some("example.com".into())
+        );
+        assert_eq!(normalize_host_limit_key("https://example.com"), None);
+        assert_eq!(normalize_host_limit_key("example.com:8443"), None);
+        assert_eq!(normalize_host_limit_key("example.com/download"), None);
+    }
+
+    #[test]
+    fn rejects_duplicate_host_limit_rows_case_insensitively() {
+        let mut dialog = SettingsDialog::default();
+        dialog.host_limit_rows = vec![
+            ("EXAMPLE.com".into(), 8),
+            ("example.COM".into(), 4),
+        ];
+        assert!(!dialog.host_limit_rows_valid());
     }
 }

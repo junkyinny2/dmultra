@@ -838,17 +838,26 @@ pub fn wake_main_window_now() {
 pub fn wake_main_window_now() {}
 
 /// Subclass popup dialog windows so their title-bar X hides them instantly.
+///
+/// Returns how many popout windows currently exist (the caller retries while
+/// one is still being created, and otherwise only calls this when the set of
+/// open popouts changes - enumerating windows is expensive).
 #[cfg(windows)]
-pub fn subclass_popups() {
-    wakeup::subclass_popups();
+pub fn subclass_popups(titles: &[String]) -> usize {
+    wakeup::subclass_popups(titles)
 }
 
 #[cfg(not(windows))]
-pub fn subclass_popups() {}
+pub fn subclass_popups(_titles: &[String]) -> usize {
+    0
+}
 
 #[cfg(windows)]
 mod wakeup {
+    use std::collections::HashMap;
     use std::ffi::c_int;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
 
     #[repr(C)]
     #[derive(Default, Clone, Copy)]
@@ -895,23 +904,9 @@ mod wakeup {
         pub(super) fn SetWindowLongPtrW(hwnd: isize, index: i32, new_long: isize) -> isize;
         pub(super) fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
         fn GetWindowPlacement(hwnd: isize, placement: *mut WindowPlacement) -> c_int;
+        fn DefWindowProcW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+        fn FindWindowW(class: *const u16, title: *const u16) -> isize;
         fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> c_int;
-    }
-
-    #[link(name = "comctl32")]
-    unsafe extern "system" {
-        pub(super) fn SetWindowSubclass(
-            hwnd: isize,
-            proc: extern "system" fn(isize, u32, usize, isize, usize, usize) -> isize,
-            subclass_id: usize,
-            ref_data: usize,
-        ) -> i32;
-        pub(super) fn DefSubclassProc(
-            hwnd: isize,
-            msg: u32,
-            wparam: usize,
-            lparam: isize,
-        ) -> isize;
     }
 
     extern "system" fn find_main(hwnd: isize, found: isize) -> i32 {
@@ -1015,50 +1010,100 @@ mod wakeup {
         }
     }
 
-    /// Subclass any popup dialog windows so their title-bar X hides them
-    /// immediately, without waiting for eframe's frame scheduling.
-    pub(super) fn subclass_popups() {
-        // no-op: subclassing via SetWindowSubclass requires comctl32 v6
-        // which is not available; close latency is handled by Visible(false)
-        // plus the parent-frame repaint loop instead.
-    }
-
-    extern "system" fn collect_cb(hwnd: isize, lparam: isize) -> i32 {
-        unsafe {
-            let mut buf = [0u16; 256];
-            let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
-            if len > 0 {
-                let title = String::from_utf16_lossy(&buf[..len as usize]);
-                if title.starts_with("Download status")
-                    || title.starts_with("Add new download")
-                    || title.starts_with("Confirm Delete")
-                    || title.starts_with("Site Grabber")
-                    || title.starts_with("Scheduler")
-                {
-                    let targets = &mut *(lparam as *mut Vec<isize>);
-                    targets.push(hwnd);
+    /// Subclass the popout windows so their title-bar X (and Alt+F4) hides
+    /// them immediately, without waiting for eframe's frame scheduling.
+    ///
+    /// eframe paints a child viewport from the parent's frame, so a close
+    /// request needs a parent round-trip (~300 ms) before the window
+    /// disappears. Hiding it here, inside `WM_CLOSE`, is immediate; the
+    /// message is then passed on so winit still reports `CloseRequested` and
+    /// the app drops the viewport as usual.
+    ///
+    /// Returns how many popout windows currently exist, so the caller can
+    /// retry while one is still being created. Enumerating windows is far
+    /// too expensive to do every frame.
+    /// Subclass the popout windows so their title-bar X (and Alt+F4) hides
+    /// them immediately, without waiting for eframe's frame scheduling.
+    ///
+    /// eframe paints a child viewport from the parent's frame, so a close
+    /// request needs a parent round-trip (~300 ms) before the window
+    /// disappears. Hiding it here, inside `WM_CLOSE`, is immediate; the
+    /// message is then passed on so winit still reports `CloseRequested` and
+    /// the app drops the viewport as usual.
+    ///
+    /// `titles` are the exact titles of the popout windows that are currently
+    /// open. We look each one up directly with `FindWindowW` instead of
+    /// enumerating every top-level window: some driver/IME windows block
+    /// `GetWindowTextW` for ~100 ms each, which made enumeration unusably slow.
+    ///
+    /// Returns how many of those windows currently exist, so the caller can
+    /// retry while one is still being created.
+    pub(super) fn subclass_popups(titles: &[String]) -> usize {
+        let mut found = 0usize;
+        for title in titles {
+            let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+            let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
+            if hwnd == 0 {
+                continue;
+            }
+            found += 1;
+            let known = hooked()
+                .lock()
+                .map(|map| map.contains_key(&hwnd))
+                .unwrap_or(true);
+            if known {
+                continue;
+            }
+            let previous = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_proc as isize) };
+            if previous != 0 {
+                if let Ok(mut map) = hooked().lock() {
+                    map.insert(hwnd, previous);
                 }
             }
         }
-        1
+        found
     }
 
-    extern "system" fn subclass_proc(
-        hwnd: isize,
-        msg: u32,
-        wparam: usize,
-        lparam: isize,
-        _subclass_id: usize,
-        _ref_data: usize,
-    ) -> isize {
+    /// `GWLP_WNDPROC`: index of the window-procedure pointer.
+    const GWLP_WNDPROC: i32 = -4;
+
+    /// Original window procedures, keyed by window.
+    fn hooked() -> &'static Mutex<HashMap<isize, isize>> {
+        static HOOKED: OnceLock<Mutex<HashMap<isize, isize>>> = OnceLock::new();
+        HOOKED.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Debug: how many more messages to trace for a just-closed window.
+
+    extern "system" fn subclass_proc(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize {
         const WM_CLOSE: u32 = 0x0010;
+        const WM_NCDESTROY: u32 = 0x0082;
         const SW_HIDE: i32 = 0;
-        unsafe {
-            if msg == WM_CLOSE {
+
+        let previous = hooked()
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&hwnd).copied());
+        let Some(previous) = previous else {
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        };
+
+        if msg == WM_CLOSE {
+            // Hide first: this is the whole point (instant close). The
+            // message is still forwarded so the close is fully processed.
+            unsafe {
                 ShowWindow(hwnd, SW_HIDE);
             }
         }
-        unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+
+        let result = unsafe { CallWindowProcW(previous, hwnd, msg, wparam, lparam) };
+
+        if msg == WM_NCDESTROY {
+            if let Ok(mut map) = hooked().lock() {
+                map.remove(&hwnd);
+            }
+        }
+        result
     }
 }
 

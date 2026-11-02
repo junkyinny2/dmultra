@@ -1,4 +1,5 @@
 /target
+/releases/
 *.exe
 *.pdb
 *.crx

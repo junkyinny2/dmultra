@@ -151,3 +151,20 @@
   `test-minimized-progress.ps1`.
 - Removed the temporary `DMULTRA_NO_BUSY_WAKER` diagnostics gate from the
   busy-frame waker.
+
+## v0.064 (built, not published)
+- Child windows now close instantly. The title-bar X used to take ~300 ms
+  (worst case 3.4 s) before the window disappeared, because the close
+  request had to travel through eframe's event loop first. Each popout
+  procedure is now subclassed with `SetWindowLongPtrW` and hides itself
+  with `ShowWindow(SW_HIDE)` inside `WM_CLOSE` before the message is
+  forwarded, so winit still reports `CloseRequested` and everything else
+  behaves exactly as before. Measured 30-80 ms after the change.
+- Popouts are found with `FindWindowW` by exact title instead of an
+  `EnumWindows` sweep. Enumerating cost 100-215 ms because
+  `GetWindowTextW` blocks ~100 ms on driver/IME helper windows
+  (`NVOGLDC invisible`, `Default IME`). The hook also only runs when
+  the set of open popouts changes, with a retry while a window is still
+  being created.
+- Removed the FRAME/GL/HOOK timing instrumentation added while diagnosing
+  the lag, and set `vsync: false` on the native options.

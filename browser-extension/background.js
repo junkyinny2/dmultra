@@ -1,5 +1,7 @@
 // Native messaging bridge to DM Ultra.
 const HOST = 'com.dmultra.nm';
+let activeOverlayOwner = null;
+
 function send(msg) {
   chrome.runtime.sendNativeMessage(HOST, msg, () => {
     if (chrome.runtime.lastError) {
@@ -7,10 +9,37 @@ function send(msg) {
     }
   });
 }
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, sender) => {
   // Forward video overlay updates directly to the native host.
-  if (msg && (msg.action === 'videoOverlay' || msg.action === 'videoOverlayHide')) {
+  if (msg && msg.action === 'videoOverlay') {
+    const owner = {
+      tabId: sender.tab ? sender.tab.id : -1,
+      frameId: sender.frameId || 0,
+      area: Math.max(0, Number(msg.w) || 0) * Math.max(0, Number(msg.h) || 0),
+    };
+    if (
+      activeOverlayOwner &&
+      activeOverlayOwner.tabId === owner.tabId &&
+      activeOverlayOwner.frameId !== owner.frameId &&
+      owner.area <= activeOverlayOwner.area
+    ) {
+      return;
+    }
+    activeOverlayOwner = owner;
     send(msg);
+    return;
+  }
+  if (msg && msg.action === 'videoOverlayHide') {
+    const tabId = sender.tab ? sender.tab.id : -1;
+    const frameId = sender.frameId || 0;
+    if (
+      activeOverlayOwner &&
+      activeOverlayOwner.tabId === tabId &&
+      activeOverlayOwner.frameId === frameId
+    ) {
+      activeOverlayOwner = null;
+      send(msg);
+    }
     return;
   }
   if (msg && typeof msg.url === 'string' && msg.url) send(msg);
@@ -65,6 +94,10 @@ chrome.webRequest.onBeforeRequest.addListener(
 // Clean up on tab close.
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabVideos.delete(tabId);
+  if (activeOverlayOwner && activeOverlayOwner.tabId === tabId) {
+    activeOverlayOwner = null;
+    send({ action: 'videoOverlayHide' });
+  }
 });
 // Handle "what videos do you know about" queries from the content script.
 chrome.runtime.onMessage.addListener((msg, sender) => {
@@ -80,20 +113,34 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   }
 });
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: 'dmultra-link',
-    title: 'Download with DM Ultra',
-    contexts: ['link'],
-  });
-  chrome.contextMenus.create({
-    id: 'dmultra-grab',
-    title: 'Grab download links from this page',
-    contexts: ['page'],
-  });
-  chrome.contextMenus.create({
-    id: 'dmultra-video',
-    title: 'Download videos from this page',
-    contexts: ['page'],
+  chrome.contextMenus.removeAll(() => {
+    if (chrome.runtime.lastError) {
+      console.error('DM Ultra: could not refresh context menus:', chrome.runtime.lastError.message);
+      return;
+    }
+    for (const menu of [
+      {
+        id: 'dmultra-link',
+        title: 'Download with DM Ultra',
+        contexts: ['link'],
+      },
+      {
+        id: 'dmultra-grab',
+        title: 'Grab download links from this page',
+        contexts: ['page'],
+      },
+      {
+        id: 'dmultra-video',
+        title: 'Download videos from this page',
+        contexts: ['page'],
+      },
+    ]) {
+      chrome.contextMenus.create(menu, () => {
+        if (chrome.runtime.lastError) {
+          console.error('DM Ultra: could not create context menu:', chrome.runtime.lastError.message);
+        }
+      });
+    }
   });
 });
 chrome.contextMenus.onClicked.addListener((info, tab) => {

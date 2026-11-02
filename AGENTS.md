@@ -2,6 +2,10 @@
 
 ## HARD RULE: Download windows are ALWAYS separate OS windows
 
+Always recompile the binary when done, then zip the source code and binaries and put them in files with build version in the filename.
+
+Everytime you increase a version, zip it so we can always revert back changes.
+
 **Never render the download window, the download progress window, or the
 Add-URL / "Download File Info" dialog as an egui::Window pane inside the
 main window. They must always be their own OS-level popout windows,

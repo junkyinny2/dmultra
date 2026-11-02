@@ -728,6 +728,13 @@ pub struct DmApp {
     speed_samples: HashMap<u64, (Instant, u64)>,
     speeds: HashMap<u64, f64>,
 
+    /// Popout set the window-procedure hook was last installed for, and
+    /// whether a hook pass is still owed (a window that was mid-creation).
+    /// Scanning for popout windows is expensive, so it only runs when the
+    /// set of open popouts actually changes.
+    hook_signature: (Vec<u64>, u8),
+    hook_pending: bool,
+
     // Scheduler runtime state
     scheduler_last_tick: Instant,
     scheduler_last_window: HashMap<String, bool>,
@@ -835,6 +842,8 @@ impl DmApp {
             accent,
             speed_samples: HashMap::new(),
             speeds: HashMap::new(),
+            hook_signature: (Vec::new(), 0),
+            hook_pending: false,
             scheduler_last_tick: Instant::now(),
             scheduler_last_window: HashMap::new(),
             scheduler_started: HashSet::new(),
@@ -3145,6 +3154,58 @@ impl eframe::App for DmApp {
         self.render_search_popup(ctx);
         self.show_about(ctx);
 
+        // Instant close: hook the popouts' window procedures so the
+        // title-bar X hides them immediately instead of waiting for the
+        // parent to paint the close. Windows are hooked once, when the set
+        // of open popouts changes; a window that is still being created is
+        // retried on the next frame.
+        let dialog_bits = (self.add_dialog.open as u8)
+            | ((self.delete_confirm.open as u8) << 1)
+            | ((self.settings_dialog.open as u8) << 2)
+            | ((self.scheduler_dialog.open as u8) << 3)
+            | ((self.grabber_dialog.open as u8) << 4);
+        // Build the exact titles of the popout windows that are currently
+        // open so they can be looked up directly (enumerating all windows
+        // was far too slow).
+        let mut titles: Vec<String> = Vec::new();
+        for id in &self.active_details_popouts {
+            let rec = {
+                let st = self.manager.lock_ui();
+                st.get(*id).cloned()
+            };
+            if let Some(d) = rec {
+                let filename = d
+                    .save_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                titles.push(format!("Download status - {}", filename));
+            }
+        }
+        if self.add_dialog.open {
+            titles.push("Add new download...".into());
+        }
+        if self.delete_confirm.open {
+            titles.push("Confirm Delete".into());
+        }
+        if self.settings_dialog.open {
+            titles.push("Options".into());
+        }
+        if self.scheduler_dialog.open {
+            titles.push("Scheduler".into());
+        }
+        if self.grabber_dialog.open {
+            titles.push("Site Grabber".into());
+        }
+        let signature = (self.active_details_popouts.clone(), dialog_bits);
+        if self.hook_pending || signature != self.hook_signature {
+            let expected = titles.len();
+            let found = crate::browser::subclass_popups(&titles);
+            self.hook_signature = signature;
+            self.hook_pending = found < expected;
+        }
+
         // Native window chrome (title bar, border, caption text) follows the
         // app theme. Done last so a popout created during THIS frame is
         // themed before it is composited - otherwise the OS shows its
@@ -4887,6 +4948,11 @@ pub fn launch(manager: Arc<Manager>, start_hidden: bool) -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport,
+        // Child popout windows are painted from the parent frame and each
+        // swap waits for vblank when vsync is on, which multiplies the frame
+        // cost by the number of open windows. The UI is not animated, so
+        // painting freely is both faster and perfectly smooth.
+        vsync: false,
         ..Default::default()
     };
 
@@ -4895,5 +4961,5 @@ pub fn launch(manager: Arc<Manager>, start_hidden: bool) -> Result<()> {
     // the watcher nudges the (otherwise idle) event loop. See browser.rs.
     crate::browser::spawn_pending_waker();
     eframe::run_native(&title, options, Box::new(move |_cc| Box::new(app)))
-        .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
+    .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
 }

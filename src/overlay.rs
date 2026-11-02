@@ -39,6 +39,8 @@ pub struct OverlayState {
     pub h: AtomicI32,
     /// Video URL to download when clicked.
     pub url: std::sync::Mutex<String>,
+    /// Page URL to send as the download referrer.
+    pub referer: std::sync::Mutex<String>,
     /// Friendly title / file name shown in the menu header.
     pub title: std::sync::Mutex<String>,
     /// Video format label (MP4, M3U8, WEBM, etc).
@@ -71,6 +73,7 @@ impl Default for OverlayState {
             w: AtomicI32::new(0),
             h: AtomicI32::new(0),
             url: std::sync::Mutex::new(String::new()),
+            referer: std::sync::Mutex::new(String::new()),
             title: std::sync::Mutex::new(String::new()),
             format: std::sync::Mutex::new(String::new()),
             qualities: std::sync::Mutex::new(Vec::new()),
@@ -153,8 +156,8 @@ extern "system" {
     fn RegisterClassExW(lp_wnd_class: *const WNDCLASSEXW) -> u16;
     fn ShowWindow(hwnd: isize, n_cmd_show: i32) -> i32;
     fn UpdateWindow(hwnd: isize) -> i32;
-    fn GetDC(hwnd: isize) -> isize;
-    fn ReleaseDC(hwnd: isize, hdc: isize) -> i32;
+    fn BeginPaint(hwnd: isize, paint: *mut PAINTSTRUCT) -> isize;
+    fn EndPaint(hwnd: isize, paint: *const PAINTSTRUCT) -> i32;
     fn SetWindowPos(
         hwnd: isize,
         hwnd_insert_after: isize,
@@ -249,6 +252,16 @@ struct RECT {
 }
 
 #[repr(C)]
+struct PAINTSTRUCT {
+    hdc: isize,
+    erase: i32,
+    paint: RECT,
+    restore: i32,
+    inc_update: i32,
+    reserved: [u8; 32],
+}
+
+#[repr(C)]
 struct MONITORINFO {
     cb_size: u32,
     rc_monitor: RECT,
@@ -316,6 +329,7 @@ const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 
 static OVERLAY_STATE: std::sync::OnceLock<Arc<OverlayState>> = std::sync::OnceLock::new();
 static HOVERED: AtomicBool = AtomicBool::new(false);
+static HOVERED_MENU_ITEM: AtomicI32 = AtomicI32::new(-1);
 
 fn state() -> &'static Arc<OverlayState> {
     OVERLAY_STATE.get_or_init(|| Arc::new(OverlayState::default()))
@@ -346,6 +360,7 @@ fn geometry_ok(x: i32, y: i32, w: i32, h: i32) -> bool {
 /// Update the overlay with new video info from the browser extension.
 pub fn update_overlay(
     url: &str,
+    referer: &str,
     title: &str,
     format: &str,
     qualities: Vec<(String, String)>,
@@ -377,10 +392,12 @@ pub fn update_overlay(
     };
     let video_changed = {
         let mut u = st.url.lock().unwrap();
+        let mut r = st.referer.lock().unwrap();
         let mut t = st.title.lock().unwrap();
         let mut f = st.format.lock().unwrap();
-        let changed = *u != url || *t != title || *f != format;
+        let changed = *u != url || *r != referer || *t != title || *f != format;
         *u = url.to_string();
+        *r = referer.to_string();
         *t = title;
         *f = format.to_string();
         changed
@@ -388,18 +405,19 @@ pub fn update_overlay(
     // Ensure at least one selectable entry.
     let mut qualities = qualities;
     if qualities.is_empty() {
-        qualities.push((format.to_uppercase(), url.to_string()));
+        qualities.push((format.to_uppercase() + " - Original", url.to_string()));
     }
-    *st.qualities.lock().unwrap() = qualities;
+    let qualities_changed = {
+        let mut current = st.qualities.lock().unwrap();
+        let changed = *current != qualities;
+        *current = qualities;
+        changed
+    };
     st.x.store(screen_x, Ordering::Relaxed);
     st.y.store(screen_y, Ordering::Relaxed);
     st.w.store(width, Ordering::Relaxed);
     st.h.store(height, Ordering::Relaxed);
     st.visible.store(true, Ordering::Relaxed);
-    // A heartbeat for the same video must not close an open quality menu.
-    if video_changed {
-        st.menu_open.store(false, Ordering::Relaxed);
-    }
     *st.last_feed.lock().unwrap() = Some(Instant::now());
     if !was_visible {
         crate::logfile::log(
@@ -414,7 +432,7 @@ pub fn update_overlay(
         spawn_overlay_thread();
     } else {
         let hwnd = st.hwnd.load(Ordering::Relaxed) as isize;
-        refresh_window(hwnd, video_changed);
+        refresh_window(hwnd, video_changed || qualities_changed);
     }
 }
 
@@ -425,6 +443,7 @@ pub fn hide_overlay() {
     st.menu_open.store(false, Ordering::Relaxed);
     *st.last_feed.lock().unwrap() = None;
     st.url.lock().unwrap().clear();
+    st.referer.lock().unwrap().clear();
     st.format.lock().unwrap().clear();
     st.qualities.lock().unwrap().clear();
     let hwnd = st.hwnd.load(Ordering::Relaxed) as isize;
@@ -434,6 +453,39 @@ pub fn hide_overlay() {
     if was_visible {
         crate::logfile::log("OVERLAY", "hidden");
     }
+}
+
+fn queue_video_download(url: &str, label: &str) {
+    let pending = crate::state::state_dir().join("pending");
+    if let Err(error) = std::fs::create_dir_all(&pending) {
+        crate::logfile::log(
+            "OVERLAY",
+            &format!("could not queue {label}: create pending directory: {error}"),
+        );
+        return;
+    }
+
+    let stamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_nanos(),
+        Err(error) => {
+            crate::logfile::log(
+                "OVERLAY",
+                &format!("could not queue {label}: system clock error: {error}"),
+            );
+            return;
+        }
+    };
+    let referer = state().referer.lock().unwrap().clone();
+    let payload = serde_json::json!({"url": url, "referer": referer}).to_string();
+    let path = pending.join(format!("{stamp}.json"));
+    if let Err(error) = std::fs::write(&path, payload) {
+        crate::logfile::log(
+            "OVERLAY",
+            &format!("could not queue {label} at {}: {error}", path.display()),
+        );
+        return;
+    }
+    crate::logfile::log("OVERLAY", &format!("queued: {label}"));
 }
 
 /// Called periodically by the GUI while it is alive. Hides the button as
@@ -647,54 +699,47 @@ unsafe extern "system" fn overlay_wndproc(
                 dw_hover_time: 0,
             };
             unsafe { TrackMouseEvent(&tme) };
-            if !HOVERED.load(Ordering::Relaxed) {
-                HOVERED.store(true, Ordering::Relaxed);
+            let packed = lparam as u32;
+            let y = ((packed >> 16) as u16 as i16) as i32;
+            let menu_open = st.menu_open.load(Ordering::Relaxed);
+            let item_count = st.qualities.lock().unwrap().len().min(8) as i32;
+            let hovered_item = if menu_open && y >= BTN_H + MENU_HEADER_H {
+                (y - BTN_H - MENU_HEADER_H) / MENU_ITEM_H
+            } else {
+                -1
+            };
+            let hovered_item = if hovered_item >= 0 && hovered_item < item_count {
+                hovered_item
+            } else {
+                -1
+            };
+            let menu_item_changed =
+                HOVERED_MENU_ITEM.swap(hovered_item, Ordering::Relaxed) != hovered_item;
+            let button_hover_changed = !HOVERED.swap(true, Ordering::Relaxed);
+            if menu_item_changed || button_hover_changed {
                 unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
             }
             0
         }
         WM_MOUSELEAVE => {
             HOVERED.store(false, Ordering::Relaxed);
+            HOVERED_MENU_ITEM.store(-1, Ordering::Relaxed);
             unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
             0
         }
         WM_LBUTTONDOWN => {
-            let x = (lparam as u32 & 0xFFFF) as i32;
-            let y = ((lparam as u32) >> 16) as i32;
+            let packed = lparam as u32;
+            let x = (packed as u16 as i16) as i32;
+            let y = ((packed >> 16) as u16 as i16) as i32;
             let menu_open = st.menu_open.load(Ordering::Relaxed);
             if menu_open {
-                // Menu is open: window is MENU_W wide.
-                // Button sits at right edge: x in [MENU_W - BTN_W, MENU_W)
-                // Menu items are below button: y >= BTN_H
                 let btn_left = MENU_W - BTN_W;
                 if y < BTN_H && x >= btn_left {
-                    // Clicked the button area -> close menu.
                     st.menu_open.store(false, Ordering::Relaxed);
-                    reposition_window(hwnd, true);
-                } else if y >= BTN_H + MENU_HEADER_H {
-                    // Clicked a menu item.
-                    let idx = (y - BTN_H - MENU_HEADER_H) / MENU_ITEM_H;
-                    let quals = st.qualities.lock().unwrap();
-                    if idx >= 0 && (idx as usize) < quals.len() {
-                        let (label, url) = &quals[idx as usize];
-                        crate::logfile::log("OVERLAY", &format!("clicked: {label}"));
-                        // Send this URL to the pending queue (like a browser click).
-                        let _ = std::fs::create_dir_all(crate::state::state_dir().join("pending"));
-                        let stamp = crate::state::unix_now() * 1_000_000_000;
-                        let payload = serde_json::json!({"url": url, "referer": ""}).to_string();
-                        let _ = std::fs::write(
-                            crate::state::state_dir()
-                                .join("pending")
-                                .join(format!("{stamp}.json")),
-                            payload,
-                        );
-                    }
-                    st.menu_open.store(false, Ordering::Relaxed);
+                    HOVERED_MENU_ITEM.store(-1, Ordering::Relaxed);
                     reposition_window(hwnd, true);
                 }
-                // Click elsewhere (menu background) -> ignore, keep menu open.
             } else {
-                // Menu closed: button fills window (0..BTN_W).
                 if x < BTN_W && y < BTN_H {
                     st.menu_open.store(true, Ordering::Relaxed);
                     reposition_window(hwnd, true);
@@ -703,8 +748,20 @@ unsafe extern "system" fn overlay_wndproc(
             0
         }
         WM_LBUTTONUP => {
-            // Menu selection is handled in LBUTTONDOWN; just ensure the menu
-            // stays open after a click on the button area.
+            if st.menu_open.load(Ordering::Relaxed) {
+                let packed = lparam as u32;
+                let y = ((packed >> 16) as u16 as i16) as i32;
+                if y >= BTN_H + MENU_HEADER_H {
+                    let index = (y - BTN_H - MENU_HEADER_H) / MENU_ITEM_H;
+                    let selected = st.qualities.lock().unwrap().get(index as usize).cloned();
+                    if let Some((label, url)) = selected {
+                        queue_video_download(&url, &label);
+                        st.menu_open.store(false, Ordering::Relaxed);
+                        HOVERED_MENU_ITEM.store(-1, Ordering::Relaxed);
+                        reposition_window(hwnd, true);
+                    }
+                }
+            }
             0
         }
         WM_TIMER => {
@@ -724,7 +781,8 @@ unsafe extern "system" fn overlay_wndproc(
 
 fn paint_window(hwnd: isize, st: &OverlayState) {
     unsafe {
-        let hdc = GetDC(hwnd);
+        let mut paint: PAINTSTRUCT = std::mem::zeroed();
+        let hdc = BeginPaint(hwnd, &mut paint);
         if hdc == 0 {
             return;
         }
@@ -803,6 +861,7 @@ fn paint_window(hwnd: isize, st: &OverlayState) {
             }
 
             let menu_brush = CreateSolidBrush(COLOR_MENU_FACE);
+            let hover_brush = CreateSolidBrush(COLOR_MENU_ITEM_HOVER);
             for i in 0..qual_count {
                 let item_rc = RECT {
                     left: 0,
@@ -810,9 +869,15 @@ fn paint_window(hwnd: isize, st: &OverlayState) {
                     right: MENU_W,
                     bottom: BTN_H + MENU_HEADER_H + (i + 1) * MENU_ITEM_H,
                 };
-                FillRect(hdc, &item_rc, menu_brush);
+                let brush = if HOVERED_MENU_ITEM.load(Ordering::Relaxed) == i {
+                    hover_brush
+                } else {
+                    menu_brush
+                };
+                FillRect(hdc, &item_rc, brush);
             }
             DeleteObject(menu_brush);
+            DeleteObject(hover_brush);
 
             let quals = st.qualities.lock().unwrap();
             for (i, (label, _)) in quals.iter().take(8).enumerate() {
@@ -820,12 +885,17 @@ fn paint_window(hwnd: isize, st: &OverlayState) {
                 let item_text: Vec<u16> =
                     label.encode_utf16().chain(std::iter::once(0)).collect();
                 SetBkMode(hdc, TRANSPARENT_BK);
-                SetTextColor(hdc, 0x001A1A2E); // dark text
+                let color = if HOVERED_MENU_ITEM.load(Ordering::Relaxed) == i as i32 {
+                    COLOR_BTN_TEXT
+                } else {
+                    0x001A1A2E
+                };
+                SetTextColor(hdc, color);
                 TextOutW(hdc, 10, y + (MENU_ITEM_H - 14) / 2, item_text.as_ptr(), (item_text.len() - 1) as i32);
             }
         }
 
-        ReleaseDC(hwnd, hdc);
+        EndPaint(hwnd, &paint);
     }
 }
 

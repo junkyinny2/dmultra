@@ -6,10 +6,13 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8');
 
-function createClickHarness() {
+function createClickHarness({ documentElement = {}, videos = [] } = {}) {
   let clickHandler;
   const sent = [];
   const fetchCalls = [];
+  const intervals = [];
+  const documentHandlers = new Map();
+  let observedRoot;
   const fetch = async (url) => {
     fetchCalls.push(url);
     return { text: async () => '' };
@@ -17,15 +20,25 @@ function createClickHarness() {
   const document = {
     addEventListener(type, handler) {
       if (type === 'click') clickHandler = handler;
+      const handlers = documentHandlers.get(type) || [];
+      handlers.push(handler);
+      documentHandlers.set(type, handlers);
     },
-    documentElement: {},
+    documentElement,
     visibilityState: 'visible',
+    readyState: 'complete',
+    title: 'Example video',
     hasFocus: () => true,
-    querySelectorAll: () => [],
+    querySelectorAll: (selector) => (
+      selector === 'video' || selector === 'video, object, embed' ? videos : []
+    ),
   };
   class MutationObserver {
-    observe() {}
-  }
+    observe(root) {
+      if (!root) throw new TypeError('MutationObserver root is not a Node');
+      observedRoot = root;
+    }
+  };
   const window = {
     addEventListener() {},
     fetch,
@@ -51,7 +64,10 @@ function createClickHarness() {
     MutationObserver,
     URL,
     setTimeout: () => 1,
-    setInterval: () => 1,
+    setInterval: (callback, delay) => {
+      intervals.push({ callback, delay });
+      return intervals.length;
+    },
     requestAnimationFrame() {},
     fetch,
     XMLHttpRequest: function () {},
@@ -68,7 +84,12 @@ function createClickHarness() {
   return {
     sent,
     fetchCalls,
+    intervals,
     window,
+    document,
+    context,
+    documentHandlers,
+    get observedRoot() { return observedRoot; },
     click({ anchor, target = anchor, path = [anchor, document], ...modifiers }) {
       let prevented = false;
       clickHandler({
@@ -129,4 +150,62 @@ test('does not recursively parse an HLS playlist fetched by the parser', async (
     'https://host.test/video.m3u8',
     'https://host.test/video.m3u8',
   ]);
+});
+
+test('waits for documentElement before observing early-injected frames', () => {
+  const harness = createClickHarness({ documentElement: null });
+  assert.equal(harness.observedRoot, undefined);
+  harness.document.documentElement = {};
+  for (const handler of harness.documentHandlers.get('DOMContentLoaded') || []) {
+    handler();
+  }
+  assert.equal(harness.observedRoot, harness.document.documentElement);
+});
+
+test('labels the detected stream with the playing video resolution', () => {
+  const video = {
+    paused: false,
+    ended: false,
+    readyState: 2,
+    videoWidth: 1920,
+    videoHeight: 1080,
+    currentSrc: 'https://host.test/movie.mp4',
+    getBoundingClientRect: () => ({
+      left: 20,
+      top: 30,
+      right: 820,
+      bottom: 480,
+    }),
+  };
+  const harness = createClickHarness({ videos: [video] });
+  harness.context.addVideo(video.currentSrc, 'mp4', '');
+
+  assert.equal(harness.sent[0].qualities[0].label, 'MP4 - 1920x1080');
+});
+
+test('refreshes the native overlay before its stale heartbeat timeout', () => {
+  const video = {
+    paused: false,
+    ended: false,
+    readyState: 2,
+    videoWidth: 1280,
+    videoHeight: 720,
+    currentSrc: 'https://host.test/movie.mp4',
+    getBoundingClientRect: () => ({
+      left: 20,
+      top: 30,
+      right: 820,
+      bottom: 480,
+    }),
+  };
+  const harness = createClickHarness({ videos: [video] });
+  harness.context.addVideo(video.currentSrc, 'mp4', '');
+  const heartbeat = harness.intervals.find(({ delay }) => delay === 2000);
+
+  assert.ok(heartbeat, 'overlay heartbeat interval is registered');
+  heartbeat.callback();
+  assert.equal(
+    harness.sent.filter(({ action }) => action === 'videoOverlay').length,
+    2
+  );
 });
