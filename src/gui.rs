@@ -4053,8 +4053,11 @@ impl DmApp {
             let filename = d.save_path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
             // A unique key per download ID so each progress window remembers
-            // its own position independently.
+            // its own position independently. ALSO track a shared "last
+            // moved" key so NEW downloads open at the last position any
+            // download window was moved to (instead of upper-left cascade).
             let key = format!("dl-progress-{}", id);
+            let shared_key = "dl-progress-last";
             let cascade_index = self
                 .active_details_popouts
                 .iter()
@@ -4062,10 +4065,18 @@ impl DmApp {
                 .unwrap_or(0);
             let saved_pos = {
                 let st = self.manager.lock_ui();
-                st.settings
+                // First try the per-ID position, then fall back to the shared
+                // "last moved" position so new downloads open where the user
+                // last put a progress window.
+                let per_id = st.settings
                     .remember_window_pos
                     .then(|| st.settings.window_positions.get(&key).copied())
-                    .flatten()
+                    .flatten();
+                let shared = st.settings
+                    .remember_window_pos
+                    .then(|| st.settings.window_positions.get(shared_key).copied())
+                    .flatten();
+                per_id.or(shared)
             };
             let initial_pos = if let Some([x, y]) = saved_pos {
                 egui::pos2(x, y)
@@ -4332,6 +4343,9 @@ impl DmApp {
                 || (pos[1] - open_pos.y).abs() > 4.0;
             if moved {
                 self.save_position(key, pos);
+                // Also update the shared "last moved" key so NEW downloads
+                // open at this position.
+                self.save_position("dl-progress-last", pos);
             }
         }
     }
