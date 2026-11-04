@@ -1969,8 +1969,16 @@ impl eframe::App for DmApp {
         // flips the window visible right after the first frame, so hide it
         // again in that same frame (commands are applied before the event
         // loop returns, so there is no visible flash).
+        //
+        // This is a raw Win32 `ShowWindow(SW_HIDE)`, NOT eframe's
+        // `ViewportCommand::Visible(false)`. If eframe believes the main
+        // window is invisible it stops pumping queued Win32 messages for the
+        // child progress popouts, which makes them frozen (unclickable,
+        // unmovable, unclosable). Keeping eframe's internal state "visible"
+        // keeps the popouts fully interactive while the user never sees the
+        // main window.
         if std::mem::take(&mut self.hide_main_window) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            crate::browser::hide_main_window();
         }
 
         // Remember where the main window is (honours the setting).
@@ -2015,6 +2023,8 @@ impl eframe::App for DmApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            // Undo the raw Win32 hide (eframe already believes it is visible).
+            crate::browser::show_main_window();
             crate::logfile::log("TRAY", "main window restored from the tray");
         }
 
@@ -2022,7 +2032,7 @@ impl eframe::App for DmApp {
         if ctx.input(|i| i.viewport().close_requested()) && effective_mode != "taskbar" {
             self.show_main_window = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            crate::browser::hide_main_window();
             crate::logfile::log("TRAY", "close button hid the main window to the tray");
         }
 
@@ -2035,10 +2045,17 @@ impl eframe::App for DmApp {
             // for iconic windows, and a hidden *restored* window keeps
             // painting the child progress windows.
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            crate::browser::hide_main_window();
             crate::logfile::log("TRAY", "minimize button hid the main window to the tray");
         }
         self.was_minimized = minimized && self.show_main_window;
+
+        // Safety net: whenever the app state says the main window is hidden,
+        // make sure it really is Win32-hidden, while never letting eframe know
+        // (see the note at the top of `update`). Idempotent and cheap.
+        if !self.show_main_window {
+            crate::browser::hide_main_window();
+        }
 
         // The tray icon is present for both tray modes and whenever the
         // main window is hidden; "taskbar" mode keeps it out of the tray.
@@ -4966,10 +4983,13 @@ pub fn launch(manager: Arc<Manager>, start_hidden: bool) -> Result<()> {
         .with_inner_size(inner_size)
         .with_min_inner_size(MIN_INNER)
         .with_title(title.clone())
-        // eframe forces the window visible after its first frame, so the
-        // app also sends `ViewportCommand::Visible(false)` below when this
-        // is a browser-launched (background) instance.
-        .with_visible(!start_hidden)
+        // The main window is ALWAYS created "visible" from eframe's point of
+        // view, even for a browser-launched (background) instance. A
+        // background launch hides it on the first frame with a raw Win32
+        // `ShowWindow(SW_HIDE)` instead (see `update`). Letting eframe believe
+        // the window is invisible stops it pumping queued messages for the
+        // progress popouts, which freezes them (unclickable/unclosable).
+        .with_visible(true)
         .with_icon(window_icon()?);
     if let Some(pos) = initial_pos {
         viewport = viewport.with_position(pos);

@@ -186,3 +186,27 @@
   and hooks every match, so two progress windows that share a title
   (e.g. two downloads of `blob.bin`) both get the instant title-bar close.
   `FindWindowW` only ever returned the first one.
+
+## v0.066 - fix progress popout freezing when the main window is hidden
+- Root cause of "download finishes, then the progress window is stuck
+  (cannot move, click, or close)": immediate viewports are painted from the
+  parent frame, and on Windows eframe schedules no frames for a hidden
+  window. The busy-waker forced frames by posting a synthetic WM_SIZE to
+  the main window every 100 ms, but a full frame costs ~200 ms. The wake
+  rate therefore outran the paint rate, the Win32 message queue grew
+  without bound, and every queued input message - mouse move/click, and
+  even WM_CLOSE - was starved for minutes. The window looked frozen and a
+  core sat at ~45%.
+- The busy-waker is now self-clocking: it re-posts a wake only after the
+  app has consumed the previous one (a frame completed, counted by the new
+  rame_seq atomic) with a 2-second fallback. Queue depth is bounded to
+  one wake in flight; frames stay ~5/s and input latency drops from
+  minutes to under 200 ms. Measured: WM_CLOSE handled in ~190 ms, CPU
+  ~2% of one core (was ~45%) with the main window hidden.
+- Safety: state.rs no longer uses println!. The release binary is a
+  Windows GUI-subsystem program with no console, so a stderr write fails
+  and println! panics, aborting the whole process; that path now logs
+  to the rotating log file. A panic hook writes panic.log under the
+  app data dir so a future crash is visible instead of silent.
+- Diagnostics: optional [DEBUG_HOOK] / popout-button lines are written
+  to the log file (never stderr) so the next report is actionable.

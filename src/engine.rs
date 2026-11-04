@@ -182,16 +182,17 @@ async fn sync_part_file(part: &PathBuf, downloaded: u64) -> Result<()> {
 }
 
 async fn persist(state: &Arc<Mutex<State>>, rec: &DownloadRec) {
-    let mut st = state.lock().await;
-    if let Some(existing) = st.get_mut(rec.id) {
-        *existing = rec.clone();
-    } else {
-        st.downloads.push(rec.clone());
-    }
-    if st.save().is_err() {
-        // State save failures must not kill an active download; the
-        // next periodic save retries.
-    }
+    let state_clone = {
+        let mut st = state.lock().await;
+        if let Some(existing) = st.get_mut(rec.id) {
+            *existing = rec.clone();
+        } else {
+            st.downloads.push(rec.clone());
+        }
+        (*st).clone()
+    };
+    // Release lock before file I/O to avoid blocking the GUI thread.
+    let _ = state_clone.save();
 }
 
 /// Retry an async fallible operation up to `attempts` times with an

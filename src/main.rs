@@ -400,6 +400,16 @@ fn attach_parent_console() {
 fn attach_parent_console() {}
 
 fn main() -> Result<()> {
+    // Panic hook to capture panics and write to file
+    let orig_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let msg = panic_info.to_string();
+        let bt = std::backtrace::Backtrace::capture();
+        let log_path = crate::state::state_dir().join("panic.log");
+        let _ = std::fs::write(&log_path, format!("PANIC: {}\n\nBACKTRACE:\n{:?}", msg, bt));
+        orig_hook(panic_info);
+    }));
+
     // The browser launches the native messaging host with the extension
     // origin (Chrome/Chromium: chrome-extension://<id>/) or the add-on id
     // (Firefox) as the sole argument. Route that straight to the host

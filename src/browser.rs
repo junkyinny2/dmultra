@@ -837,6 +837,31 @@ pub fn wake_main_window_now() {
 #[cfg(not(windows))]
 pub fn wake_main_window_now() {}
 
+/// Hide this process' main window at the Win32 level (tray "hidden" state).
+///
+/// Use this instead of `ViewportCommand::Visible(false)` for the main window;
+/// see [`wakeup::hide`] for why (eframe's hidden state starves the popouts).
+#[cfg(windows)]
+pub fn hide_main_window() {
+    if let Some(hwnd) = wakeup::main_window() {
+        wakeup::hide(hwnd);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn hide_main_window() {}
+
+/// Show/restore this process' main window after [`hide_main_window`].
+#[cfg(windows)]
+pub fn show_main_window() {
+    if let Some(hwnd) = wakeup::main_window() {
+        wakeup::show(hwnd);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn show_main_window() {}
+
 /// Subclass popup dialog windows so their title-bar X hides them instantly.
 ///
 /// Returns how many popout windows currently exist (the caller retries while
@@ -900,6 +925,7 @@ mod wakeup {
         pub(super) fn IsIconic(hwnd: isize) -> c_int;
         pub(super) fn IsWindowVisible(hwnd: isize) -> c_int;
         pub(super) fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+        fn SetForegroundWindow(hwnd: isize) -> c_int;
         pub(super) fn InvalidateRect(hwnd: isize, rect: isize, erase: i32) -> i32;
         pub(super) fn SetWindowLongPtrW(hwnd: isize, index: i32, new_long: isize) -> isize;
         pub(super) fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
@@ -1037,18 +1063,39 @@ mod wakeup {
         }
     }
 
-    /// Subclass the popout windows so their title-bar X (and Alt+F4) hides
-    /// them immediately, without waiting for eframe's frame scheduling.
+    /// Hide a window at the Win32 level only (no eframe involvement).
     ///
-    /// eframe paints a child viewport from the parent's frame, so a close
-    /// request needs a parent round-trip (~300 ms) before the window
-    /// disappears. Hiding it here, inside `WM_CLOSE`, is immediate; the
-    /// message is then passed on so winit still reports `CloseRequested` and
-    /// the app drops the viewport as usual.
-    ///
-    /// Returns how many popout windows currently exist, so the caller can
-    /// retry while one is still being created. Enumerating windows is far
-    /// too expensive to do every frame.
+    /// The GUI must never hide the MAIN window with eframe's
+    /// `ViewportCommand::Visible(false)`: once eframe believes the main window
+    /// is invisible, winit stops pumping *queued* Win32 messages for the child
+    /// progress popouts, so their title-bar X, buttons and drag become dead
+    /// (the "frozen popout" bug). A raw `ShowWindow(SW_HIDE)` hides the window
+    /// from the user while eframe still thinks it is visible, so the popouts
+    /// stay fully interactive. Confirmed by test: with the main window hidden
+    /// this way, a posted `WM_CLOSE` reaches the popout's subclass and a real
+    /// mouse click on its Close button is delivered, exactly as when the main
+    /// window is on screen.
+    pub(super) fn hide(hwnd: isize) {
+        const SW_HIDE: i32 = 0;
+        unsafe {
+            ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+
+    /// Show/restore a window hidden by [`hide`].
+    pub(super) fn show(hwnd: isize) {
+        const SW_SHOW: i32 = 5;
+        const SW_RESTORE: i32 = 9;
+        unsafe {
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            } else {
+                ShowWindow(hwnd, SW_SHOW);
+            }
+            SetForegroundWindow(hwnd);
+        }
+    }
+
     /// Subclass the popout windows so their title-bar X (and Alt+F4) hides
     /// them immediately, without waiting for eframe's frame scheduling.
     ///
@@ -1065,7 +1112,8 @@ mod wakeup {
     /// ever returns the first one, leaving the rest without an instant close.
     ///
     /// Returns how many of those windows currently exist, so the caller can
-    /// retry while one is still being created.
+    /// retry while one is still being created. Enumerating windows is far
+    /// too expensive to do every frame.
     pub(super) fn subclass_popups(titles: &[String]) -> usize {
         struct HookScan {
             titles: *const String,

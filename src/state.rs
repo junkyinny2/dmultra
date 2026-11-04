@@ -163,7 +163,7 @@ impl DownloadRec {
 }
 
 /// Root persistent state: download list + settings, stored as JSON.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
     /// `Software\DownloadManager\maxID` analogue.
     pub max_id: u64,
@@ -618,7 +618,10 @@ impl State {
                 // Corrupt state: quarantine it and start fresh rather
                 // than crash-looping.
                 let _ = std::fs::rename(&path, state_dir().join("state.json.corrupt"));
-                eprintln!("state.json was corrupt ({e}); it was moved to state.json.corrupt");
+                crate::logfile::log(
+                    "STATE",
+                    &format!("state.json was corrupt ({e}); it was moved to state.json.corrupt"),
+                );
                 let st = State::default();
                 st.save()?;
                 Ok(st)
