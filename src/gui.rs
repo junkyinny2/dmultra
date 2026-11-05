@@ -767,6 +767,12 @@ pub struct DmApp {
     /// minimized (active transfers or open child windows). Read by the
     /// frame waker in `browser::spawn_busy_waker`.
     busy_frames: Arc<std::sync::atomic::AtomicBool>,
+    /// Monotonic count of completed frames. The busy waker reads it so it
+    /// re-posts a synthetic wake only after the previous one has been
+    /// consumed. Posting a wake every 100 ms while a frame costs ~200 ms
+    /// grows the Win32 queue without bound and starves input (the frozen
+    /// progress popout).
+    frame_seq: Arc<AtomicU64>,
     /// Set while "minimize to tray only" is active and the window is still
     /// shown, so the waker can deliver the frame that hides it.
     minimize_watch: Arc<std::sync::atomic::AtomicBool>,
@@ -805,6 +811,18 @@ impl DmApp {
                 let _ = st.save();
             }
         }
+
+        // Keep the frame loop alive while the main window is hidden or
+        // minimized (eframe paints the child popouts from the parent frame).
+        // `frame_seq` makes the waker self-clocking so it cannot outrun
+        // painting and starve input messages.
+        let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let frame_seq = Arc::new(AtomicU64::new(0));
+        crate::browser::spawn_busy_waker(
+            Arc::clone(&busy),
+            Arc::clone(&minimize_watch),
+            Arc::clone(&frame_seq),
+        );
 
         Self {
             manager,
@@ -871,11 +889,8 @@ impl DmApp {
             browser_last_error: String::new(),
             last_main_window_save: Instant::now() - Duration::from_secs(5),
             last_show_poll: Instant::now() - Duration::from_secs(5),
-            busy_frames: {
-                let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                crate::browser::spawn_busy_waker(Arc::clone(&busy), Arc::clone(&minimize_watch));
-                busy
-            },
+            busy_frames: busy,
+            frame_seq,
             minimize_watch,
             column_widths,
             column_visible,
@@ -3222,6 +3237,9 @@ impl eframe::App for DmApp {
             || self.about_open;
         let busy_val = self.manager.active_count() > 0 || child_window_open;
         self.busy_frames.store(busy_val, Ordering::Relaxed);
+        // Tell the busy waker this frame is done so it only queues the next
+        // synthetic wake once we are ready for it.
+        self.frame_seq.fetch_add(1, Ordering::Relaxed);
         // Immediate viewports are driven by the parent frame. A timed repaint
         // keeps them responsive without spinning the GUI thread continuously.
         // A pending Win32 hook also needs another frame to attach to a window

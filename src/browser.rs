@@ -752,33 +752,69 @@ pub fn spawn_pending_waker() {}
 /// paint there, so eframe's scheduled repaints never run. A slow pulse keeps
 /// such a window alive for the scheduler, the clipboard monitor, a tray click
 /// and a second-instance show request.
+///
+/// The waker is **self-clocking**: it posts the next synthetic wake only after
+/// `frame_seq` has advanced (the GUI finished the frame the previous wake
+/// asked for), with a 2-second fallback. Posting at a fixed 100 ms rate while
+/// a frame costs ~200 ms grows the Win32 queue without bound; every queued
+/// input message - mouse move/click and even `WM_CLOSE` - is then starved for
+/// minutes and the progress popout looks frozen. Keeping at most one wake in
+/// flight bounds the queue while still driving frames at the paint rate.
 #[cfg(windows)]
 pub fn spawn_busy_waker(
     busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
     watch_minimize: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    frame_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) {
     use std::sync::atomic::Ordering;
-    let mut last_idle_wake = std::time::Instant::now();
     let _ = std::thread::Builder::new()
         .name("busy-waker".into())
-        .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            let busy_now = busy.load(Ordering::Relaxed);
-            let watch = watch_minimize.load(Ordering::Relaxed);
-            let Some(hwnd) = wakeup::main_window() else {
-                continue;
-            };
-            if busy_now && wakeup::needs_wake(hwnd) {
-                wakeup::post_resize(hwnd);
-                last_idle_wake = std::time::Instant::now();
-            } else if watch && wakeup::is_iconic(hwnd) {
-                wakeup::post_resize(hwnd);
-                last_idle_wake = std::time::Instant::now();
-            } else if wakeup::needs_wake(hwnd)
-                && last_idle_wake.elapsed() >= std::time::Duration::from_millis(500)
-            {
-                wakeup::post_resize(hwnd);
-                last_idle_wake = std::time::Instant::now();
+        .spawn(move || {
+            let mut last_idle_wake = std::time::Instant::now();
+            // Sequence value observed when the in-flight wake was posted.
+            let mut awaiting_seq: Option<u64> = None;
+            let mut wake_posted = std::time::Instant::now();
+
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+
+                let Some(hwnd) = wakeup::main_window() else {
+                    continue;
+                };
+                let busy_now = busy.load(Ordering::Relaxed);
+                let watch = watch_minimize.load(Ordering::Relaxed);
+                let current_seq = frame_seq.load(Ordering::Relaxed);
+
+                // The previous wake has been satisfied once a frame completed
+                // after it was posted. The timeout is a safety net for a wake
+                // that winit coalesced away without running a frame.
+                if let Some(seq) = awaiting_seq {
+                    if current_seq != seq
+                        || wake_posted.elapsed() >= std::time::Duration::from_secs(2)
+                    {
+                        awaiting_seq = None;
+                    }
+                }
+
+                let active = (busy_now || watch && wakeup::is_iconic(hwnd))
+                    && wakeup::needs_wake(hwnd);
+
+                if active {
+                    if awaiting_seq.is_none() {
+                        wakeup::post_resize(hwnd);
+                        awaiting_seq = Some(current_seq);
+                        wake_posted = std::time::Instant::now();
+                        last_idle_wake = wake_posted;
+                    }
+                } else if wakeup::needs_wake(hwnd)
+                    && last_idle_wake.elapsed() >= std::time::Duration::from_millis(500)
+                {
+                    // Slow idle pulse for a hidden window (scheduler, tray
+                    // click, second-instance show request). Not part of the
+                    // busy loop, so it never competes with input.
+                    wakeup::post_resize(hwnd);
+                    last_idle_wake = std::time::Instant::now();
+                }
             }
         });
 }
@@ -787,6 +823,7 @@ pub fn spawn_busy_waker(
 pub fn spawn_busy_waker(
     _busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
     _watch_minimize: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _frame_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) {
 }
 

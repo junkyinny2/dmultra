@@ -210,3 +210,20 @@
   app data dir so a future crash is visible instead of silent.
 - Diagnostics: optional [DEBUG_HOOK] / popout-button lines are written
   to the log file (never stderr) so the next report is actionable.
+
+## v0.067 - finish the self-clocking busy-waker (popout close/move fix)
+- v0.066 documented a self-clocking busy-waker but the tree only contained
+  the GUI half: `gui.rs` passed a new `frame_seq` counter that
+  `browser.rs::spawn_busy_waker` did not accept, so the source did not
+  compile and the frozen-popout fix was not actually in the binary.
+- `spawn_busy_waker` now takes `frame_seq` and keeps at most ONE
+  synthetic wake in flight: it posts the next `WM_SIZE` only after the
+  GUI completed the frame the previous wake requested (2 s fallback for a
+  coalesced wake). This bounds the Win32 queue, so mouse input,
+  title-bar drag and `WM_CLOSE` are no longer starved while the main
+  window is hidden to the tray or launched with `--background`.
+- The idle pulse for a hidden window is unchanged (500 ms) and is not part
+  of the busy loop.
+- `test-minimized-progress.ps1` now also posts `WM_CLOSE` to the
+  status window and asserts it hides within 2 s. Measured on this machine:
+  close latency 401 ms with the window hidden and a completed download.

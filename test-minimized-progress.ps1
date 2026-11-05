@@ -51,6 +51,7 @@ public class MinProg {
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h, ref POINT p);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
@@ -296,6 +297,22 @@ try {
 
     if ($coverage -ge 0 -and $coverage -lt 0.80) {
         Write-Host 'Screenshot the progress window shows a stale first frame (the 0% regression).'
+    }
+
+    # The user-visible symptom of the self-clocking regression: the status
+    # window is painted but its title-bar X / Close button / drag are dead
+    # because the busy-waker flooded the Win32 queue with synthetic resizes.
+    # A posted WM_CLOSE must therefore reach the app (and hide the window)
+    # promptly. Before the fix this took minutes.
+    if ([MinProg]::IsWindow($progressWindow)) {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        [MinProg]::PostMessageW($progressWindow, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+        while ($sw.ElapsedMilliseconds -lt 5000 -and [MinProg]::IsWindowVisible($progressWindow)) {
+            Start-Sleep -Milliseconds 25
+        }
+        $sw.Stop()
+        $results += Show-Check 'status window responds to close (input not starved)' `
+            ($sw.ElapsedMilliseconds -lt 2000) ("close latency={0} ms" -f $sw.ElapsedMilliseconds)
     }
 }
 finally {
