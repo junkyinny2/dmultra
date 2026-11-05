@@ -730,10 +730,16 @@ pub struct DmApp {
 
     /// Popout set the window-procedure hook was last installed for, and
     /// whether a hook pass is still owed (a window that was mid-creation).
-    /// Scanning for popout windows is expensive, so it only runs when the
-    /// set of open popouts actually changes.
+    /// Scanning for popout windows is expensive, so it is throttled to a few
+    /// passes per second while a child is open.
     hook_signature: (Vec<u64>, u8),
     hook_pending: bool,
+    last_hook_refresh: Instant,
+    /// A popout position changed in memory and still needs to be flushed to
+    /// `state.json` (throttled so a drag does not rewrite the file on every
+    /// frame, and written outside the GUI lock).
+    popout_pos_dirty: bool,
+    last_popout_save: Instant,
 
     // Scheduler runtime state
     scheduler_last_tick: Instant,
@@ -862,6 +868,9 @@ impl DmApp {
             speeds: HashMap::new(),
             hook_signature: (Vec::new(), 0),
             hook_pending: false,
+            last_hook_refresh: Instant::now() - Duration::from_secs(5),
+            popout_pos_dirty: false,
+            last_popout_save: Instant::now() - Duration::from_secs(5),
             scheduler_last_tick: Instant::now(),
             scheduler_last_window: HashMap::new(),
             scheduler_started: HashSet::new(),
@@ -1981,17 +1990,17 @@ impl DmApp {
 impl eframe::App for DmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // A browser-launched instance must not show the main window. eframe
-        // flips the window visible right after the first frame, so hide it
+        // flips the window visible right after the first frame, so park it
         // again in that same frame (commands are applied before the event
         // loop returns, so there is no visible flash).
         //
-        // This is a raw Win32 `ShowWindow(SW_HIDE)`, NOT eframe's
-        // `ViewportCommand::Visible(false)`. If eframe believes the main
-        // window is invisible it stops pumping queued Win32 messages for the
-        // child progress popouts, which makes them frozen (unclickable,
-        // unmovable, unclosable). Keeping eframe's internal state "visible"
-        // keeps the popouts fully interactive while the user never sees the
-        // main window.
+        // "Park" means moving the window off-screen while keeping it
+        // `WS_VISIBLE` and non-iconic - NOT `ShowWindow(SW_HIDE)` and NOT
+        // eframe's `ViewportCommand::Visible(false)`. eframe paints the child
+        // progress popouts from the root frame, and it stops scheduling
+        // frames once the root is hidden or iconic, which freezes those
+        // popouts. An off-screen but visible root keeps the normal frame
+        // loop and the popouts fully interactive.
         if std::mem::take(&mut self.hide_main_window) {
             crate::browser::hide_main_window();
         }
@@ -2011,20 +2020,28 @@ impl eframe::App for DmApp {
         } else {
             "taskbar"
         };
+
+        // Hook the main window once. The hook turns the minimize button into
+        // an off-screen park instead of an iconic window, because eframe
+        // refuses to schedule frames for iconic windows and the progress
+        // popouts are painted by the root frame.
+        crate::browser::install_main_hook();
+        crate::browser::set_main_window_mode(effective_mode);
+
         // The waker delivers the frame that notices a minimize; eframe cannot
-        // schedule one by itself for an iconic window.
-        // For tray-mode, wake when the window is minimized to the tray.
-        // For taskbar-mode, also wake when minimized if a child window is open,
-        // so popouts stay responsive even when the main window is minimized.
+        // schedule one by itself for an iconic window. With the park hook this
+        // is only a safety net.
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
         let has_child = !self.active_details_popouts.is_empty()
             || self.add_dialog.open
             || self.settings_dialog.open
             || self.scheduler_dialog.open
             || self.grabber_dialog.running
-            || self.about_open;
+            || self.about_open
+            || self.delete_confirm.open;
+        crate::browser::set_popout_open(has_child);
         self.minimize_watch.store(
-            (effective_mode == "tray" || (minimized && has_child)) && self.show_main_window,
+            (minimized || effective_mode != "taskbar") && self.show_main_window,
             std::sync::atomic::Ordering::Relaxed,
         );
 
@@ -2061,16 +2078,21 @@ impl eframe::App for DmApp {
             crate::logfile::log("TRAY", "close button hid the main window to the tray");
         }
 
-        // Minimize button: tray-only hides the window (and with it the
-        // taskbar button). The other modes keep normal taskbar behaviour.
-        if minimized && !self.was_minimized && self.show_main_window && effective_mode == "tray" {
-            self.show_main_window = false;
-            // Un-minimize before hiding: eframe refuses to schedule frames
-            // for iconic windows, and a hidden *restored* window keeps
-            // painting the child progress windows.
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            crate::browser::hide_main_window();
-            crate::logfile::log("TRAY", "minimize button hid the main window to the tray");
+        // Minimize button: tray modes park the window instead of letting it
+        // become iconic (the hook normally intercepts this before winit sees
+        // it; this branch is the fallback). Plain taskbar mode parks as well
+        // while a popout is open, because the popout needs the root frame.
+        if minimized && !self.was_minimized && self.show_main_window {
+            if effective_mode == "tray" {
+                self.show_main_window = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                crate::browser::hide_main_window();
+                crate::logfile::log("TRAY", "minimize button hid the main window to the tray");
+            } else if effective_mode == "taskbar_tray" || has_child {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                crate::browser::park_main_window_keeping_taskbar();
+                crate::logfile::log("TRAY", "minimize button parked the main window off-screen");
+            }
         }
         self.was_minimized = minimized && self.show_main_window;
 
@@ -3182,71 +3204,56 @@ impl eframe::App for DmApp {
 
         // Instant close: hook the popouts' window procedures so the
         // title-bar X hides them immediately instead of waiting for the
-        // parent to paint the close. Windows are hooked once, when the set
-        // of open popouts changes; a window that is still being created is
-        // retried on the next frame.
+        // parent to paint the close. The scan matches download windows by
+        // title prefix (the filename can change) and re-hooks windows that
+        // were recreated; it is throttled to a few passes per second because
+        // enumerating windows is expensive.
         let dialog_bits = (self.add_dialog.open as u8)
             | ((self.delete_confirm.open as u8) << 1)
             | ((self.settings_dialog.open as u8) << 2)
             | ((self.scheduler_dialog.open as u8) << 3)
             | ((self.grabber_dialog.open as u8) << 4);
-        // Build the exact titles of the popout windows that are currently
-        // open so they can be looked up directly (enumerating all windows
-        // was far too slow).
-        let mut titles: Vec<String> = Vec::new();
-        for id in &self.active_details_popouts {
-            let rec = {
-                let st = self.manager.lock_ui();
-                st.get(*id).cloned()
-            };
-            if let Some(d) = rec {
-                let filename = d
-                    .save_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                titles.push(format!("Download status - {}", filename));
-            }
-        }
-        if self.add_dialog.open {
-            titles.push("Add new download...".into());
-        }
-        if self.delete_confirm.open {
-            titles.push("Confirm Delete".into());
-        }
-        if self.settings_dialog.open {
-            titles.push("Options".into());
-        }
-        if self.scheduler_dialog.open {
-            titles.push("Scheduler".into());
-        }
-        if self.grabber_dialog.open {
-            titles.push("Site Grabber".into());
-        }
+        let dialog_count = [
+            self.add_dialog.open,
+            self.delete_confirm.open,
+            self.settings_dialog.open,
+            self.scheduler_dialog.open,
+            self.grabber_dialog.open,
+        ]
+        .iter()
+        .filter(|open| **open)
+        .count();
         let signature = (self.active_details_popouts.clone(), dialog_bits);
-        if self.hook_pending || signature != self.hook_signature {
-            let expected = titles.len();
-            let found = crate::browser::subclass_popups(&titles);
-            self.hook_signature = signature;
+        let expected = self.active_details_popouts.len() + dialog_count;
+        let signature_changed = signature != self.hook_signature;
+        self.hook_signature = signature;
+        if signature_changed
+            || self.hook_pending
+            || (expected > 0 && self.last_hook_refresh.elapsed() >= Duration::from_millis(250))
+        {
+            self.last_hook_refresh = Instant::now();
+            let found = crate::browser::refresh_popup_hooks();
             self.hook_pending = found < expected;
         }
 
-        // Make popout windows unowned so they don't get minimized with the main window
-        crate::browser::unown_popouts();
-
         // Immediate viewports (progress windows, dialogs) are painted by the
-        // parent window's frame. eframe does not schedule frames for a
-        // minimized or hidden window, so keep nudging the event loop while
-        // there is something to animate. This runs AFTER the popouts were
-        // rendered, so a window opened for the first time in this frame is
-        // covered immediately. See `browser::spawn_busy_waker`.
+        // parent window's frame. The park hook keeps the root visible and
+        // non-iconic, so eframe schedules these frames normally. The waker in
+        // `browser::spawn_busy_waker` remains only a safety net for an
+        // unexpectedly hidden/iconic window.
         let child_window_open = !self.active_details_popouts.is_empty()
             || self.add_dialog.open
             || self.settings_dialog.open
             || self.scheduler_dialog.open
             || self.grabber_dialog.running
-            || self.about_open;
+            || self.about_open
+            || self.delete_confirm.open;
+        crate::browser::set_popout_open(child_window_open);
+        if child_window_open {
+            // A popout that opened while the main window was truly minimized
+            // would never be painted: eframe skips frames for iconic windows.
+            crate::browser::wake_main_for_popouts();
+        }
         let busy_val = self.manager.active_count() > 0 || child_window_open;
         self.busy_frames.store(busy_val, Ordering::Relaxed);
         // Tell the busy waker this frame is done so it only queues the next
@@ -3291,6 +3298,7 @@ impl eframe::App for DmApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Flush the final window position/size, even if the debounce timer
         // had not fired yet.
+        self.flush_popout_positions();
         self.last_main_window_save = Instant::now() - Duration::from_secs(5);
         let mut st = self.manager.lock_ui();
         let _ = st.save();
@@ -3311,8 +3319,10 @@ impl DmApp {
     /// A maximized/minimized window is ignored: restoring the *normal*
     /// rectangle is what users expect, not the parked one.
     fn track_main_window(&mut self, ctx: &egui::Context) {
-        // A hidden (tray) window has no meaningful on-screen rectangle.
-        if !self.show_main_window {
+        // A parked (off-screen) window has no meaningful on-screen rectangle;
+        // saving its -32000 position would move the window there on the next
+        // launch.
+        if !self.show_main_window || crate::browser::main_window_parked() {
             return;
         }
         let (outer, inner, maximized, minimized) = ctx.input(|i| {
@@ -4275,6 +4285,7 @@ impl DmApp {
 
         if close_requested {
             self.active_details_popouts.retain(|&pop_id| pop_id != id);
+            self.flush_popout_positions();
             crate::browser::wake_main_window_now();
         }
     }
@@ -4378,8 +4389,6 @@ impl DmApp {
         key: &str,
         open_pos: egui::Pos2,
     ) {
-        // Store whenever the window has genuinely moved away from where it
-        // was opened. Saving mid-drag is harmless: the last frame wins.
         let current = ctx
             .input(|i| i.viewport().outer_rect)
             .map(|r| [r.min.x, r.min.y]);
@@ -4397,23 +4406,48 @@ impl DmApp {
         }
     }
 
-    /// Persist a popout position (no-op when the stored value is unchanged,
-    /// so dragging does not rewrite the state file on every frame).
+    /// Remember a popout position. The in-memory value is updated at once;
+    /// the state file is written at most twice per second, outside the GUI
+    /// lock, so dragging never blocks the UI thread on disk I/O.
     fn save_position(&mut self, key: &str, pos: [f32; 2]) {
-        let mut st = self.manager.lock_ui();
-        if !st.settings.remember_window_pos {
+        let changed = {
+            let mut st = self.manager.lock_ui();
+            if !st.settings.remember_window_pos {
+                return;
+            }
+            let changed = st
+                .settings
+                .window_positions
+                .get(key)
+                .map(|old| (old[0] - pos[0]).abs() > 0.5 || (old[1] - pos[1]).abs() > 0.5)
+                .unwrap_or(true);
+            if changed {
+                st.settings.window_positions.insert(key.to_string(), pos);
+            }
+            changed
+        };
+        if changed {
+            self.popout_pos_dirty = true;
+        }
+        if self.popout_pos_dirty && self.last_popout_save.elapsed() >= Duration::from_millis(500) {
+            self.flush_popout_positions();
+        }
+    }
+
+    /// Write the pending popout positions to disk (outside the GUI lock).
+    fn flush_popout_positions(&mut self) {
+        if !self.popout_pos_dirty {
             return;
         }
-        let changed = st
-            .settings
-            .window_positions
-            .get(key)
-            .map(|old| (old[0] - pos[0]).abs() > 0.5 || (old[1] - pos[1]).abs() > 0.5)
-            .unwrap_or(true);
-        if changed {
-            st.settings.window_positions.insert(key.to_string(), pos);
-            let _ = st.save();
-        }
+        self.popout_pos_dirty = false;
+        self.last_popout_save = Instant::now();
+        // Clone under the lock, save after releasing it: serializing and
+        // writing state.json must never block the UI thread.
+        let snapshot = {
+            let st = self.manager.lock_ui();
+            st.clone()
+        };
+        let _ = snapshot.save();
     }
 }
 

@@ -770,10 +770,9 @@ pub fn spawn_busy_waker(
     let _ = std::thread::Builder::new()
         .name("busy-waker".into())
         .spawn(move || {
-            let mut last_idle_wake = std::time::Instant::now();
+            let mut last_wake = std::time::Instant::now();
             // Sequence value observed when the in-flight wake was posted.
             let mut awaiting_seq: Option<u64> = None;
-            let mut wake_posted = std::time::Instant::now();
 
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -785,46 +784,39 @@ pub fn spawn_busy_waker(
                 let watch = watch_minimize.load(Ordering::Relaxed);
                 let current_seq = frame_seq.load(Ordering::Relaxed);
 
-                let iconic = wakeup::is_iconic(hwnd);
-                let needs_wake_now = wakeup::needs_wake(hwnd);
-
-                // Self-clocking is disabled for minimized windows because eframe
-                // skips frames for them, so frame_seq never advances. Instead we
-                // post at a fixed rate (every 100 ms) when active. For non-iconic
-                // windows we keep self-clocking to avoid queue buildup.
-                let self_clock = !iconic;
-
+                // Self-clocking: at most one synthetic wake is in flight. If
+                // the previous frame has not finished yet we never post more
+                // work, so the Win32 queue can never be flooded with resizes
+                // that starve mouse input and `WM_CLOSE` (the "frozen popout"
+                // bug). The 2 s fallback covers a window that genuinely does
+                // not paint (eframe skips frames for iconic windows).
                 if let Some(seq) = awaiting_seq {
-                    let frame_advanced = current_seq != seq;
-                    let timeout = if self_clock {
-                        std::time::Duration::from_secs(2)
-                    } else {
-                        std::time::Duration::from_millis(150)
-                    };
-                    if frame_advanced || wake_posted.elapsed() >= timeout {
+                    if current_seq != seq || last_wake.elapsed() >= std::time::Duration::from_secs(2)
+                    {
                         awaiting_seq = None;
                     }
                 }
 
-                let active = (busy_now || watch && iconic) && needs_wake_now;
+                // A visible, non-iconic main window schedules its own frames
+                // (and paints the immediate child popouts). Poking it would
+                // only add pointless work, so the waker stays silent.
+                if !wakeup::needs_wake(hwnd) {
+                    awaiting_seq = None;
+                    continue;
+                }
 
-                if active {
-                    if awaiting_seq.is_none() {
-                        wakeup::post_resize(hwnd);
-                        if self_clock {
-                            awaiting_seq = Some(current_seq);
-                        }
-                        wake_posted = std::time::Instant::now();
-                        last_idle_wake = wake_posted;
-                    }
-                } else if needs_wake_now
-                    && last_idle_wake.elapsed() >= std::time::Duration::from_millis(500)
-                {
-                    // Slow idle pulse for a hidden window (scheduler, tray
-                    // click, second-instance show request). Not part of the
-                    // busy loop, so it never competes with input.
+                let interval = if busy_now || watch {
+                    std::time::Duration::from_millis(150)
+                } else {
+                    // Slow idle pulse so the tray click, clipboard monitor and
+                    // a second-instance show request are still observed.
+                    std::time::Duration::from_secs(1)
+                };
+
+                if awaiting_seq.is_none() && last_wake.elapsed() >= interval {
                     wakeup::post_resize(hwnd);
-                    last_idle_wake = std::time::Instant::now();
+                    awaiting_seq = Some(current_seq);
+                    last_wake = std::time::Instant::now();
                 }
             }
         });
@@ -885,61 +877,117 @@ pub fn wake_main_window_now() {
 #[cfg(not(windows))]
 pub fn wake_main_window_now() {}
 
-/// Hide this process' main window at the Win32 level (tray "hidden" state).
+/// Park this process' main window off-screen (tray "hidden" state).
 ///
-/// Use this instead of `ViewportCommand::Visible(false)` for the main window;
-/// see [`wakeup::hide`] for why (eframe's hidden state starves the popouts).
+/// The window is moved to `(-32000, -32000)` but stays `WS_VISIBLE` and
+/// **non-iconic**. That is essential: eframe paints immediate child viewports
+/// from the root frame, and it refuses to schedule frames for a minimized
+/// window (`run.rs`). A visible off-screen root keeps the normal frame loop
+/// running, so the progress popouts stay clickable, draggable and closable
+/// even though the user cannot see the main window.
+///
+/// This variant also adds `WS_EX_TOOLWINDOW` so the window leaves the
+/// taskbar (used by "tray only" and browser-background launches).
 #[cfg(windows)]
 pub fn hide_main_window() {
-    if let Some(hwnd) = wakeup::main_window() {
-        wakeup::hide(hwnd);
-    }
+    wakeup::park(true);
 }
 
 #[cfg(not(windows))]
 pub fn hide_main_window() {}
 
-/// Show/restore this process' main window after [`hide_main_window`].
+/// Park the main window while keeping its taskbar button (minimize to
+/// "taskbar and tray"). Clicking the taskbar button or the tray icon restores
+/// it.
+#[cfg(windows)]
+pub fn park_main_window_keeping_taskbar() {
+    wakeup::park(false);
+}
+
+#[cfg(not(windows))]
+pub fn park_main_window_keeping_taskbar() {}
+
+/// If the main window is genuinely iconic while a popout is open, restore it
+/// and park it off-screen. eframe cannot paint (and therefore cannot service)
+/// the popout for an iconic root.
+#[cfg(windows)]
+pub fn wake_main_for_popouts() {
+    wakeup::wake_for_popouts();
+}
+
+#[cfg(not(windows))]
+pub fn wake_main_for_popouts() {}
+
+/// Restore the main window after [`hide_main_window`] / a parked minimize.
 #[cfg(windows)]
 pub fn show_main_window() {
-    if let Some(hwnd) = wakeup::main_window() {
-        wakeup::show(hwnd);
-    }
+    wakeup::unpark();
 }
 
 #[cfg(not(windows))]
 pub fn show_main_window() {}
 
-/// Subclass popup dialog windows so their title-bar X hides them instantly.
-///
-/// Returns how many popout windows currently exist (the caller retries while
-/// one is still being created, and otherwise only calls this when the set of
-/// open popouts changes - enumerating windows is expensive).
+/// True when the main window is deliberately parked off-screen.
 #[cfg(windows)]
-pub fn subclass_popups(titles: &[String]) -> usize {
-    wakeup::subclass_popups(titles)
+pub fn main_window_parked() -> bool {
+    wakeup::is_parked()
 }
 
 #[cfg(not(windows))]
-pub fn subclass_popups(_titles: &[String]) -> usize {
+pub fn main_window_parked() -> bool {
+    false
+}
+
+/// Install the Win32 hook on the main window (once). Detects the minimize
+/// button so the root is parked instead of becoming iconic.
+#[cfg(windows)]
+pub fn install_main_hook() {
+    wakeup::install_main_hook();
+}
+
+#[cfg(not(windows))]
+pub fn install_main_hook() {}
+
+/// Tell the hook what the configured minimize mode is:
+/// `"taskbar"`, `"taskbar_tray"` or `"tray"`.
+#[cfg(windows)]
+pub fn set_main_window_mode(mode: &str) {
+    wakeup::set_main_mode(mode);
+}
+
+#[cfg(not(windows))]
+pub fn set_main_window_mode(_mode: &str) {}
+
+/// Tell the hook whether a child (progress/dialog) window is currently open.
+#[cfg(windows)]
+pub fn set_popout_open(open: bool) {
+    wakeup::set_popout_open(open);
+}
+
+#[cfg(not(windows))]
+pub fn set_popout_open(_open: bool) {}
+
+/// Hook and un-own every popout window that currently exists.
+///
+/// Matches download progress windows by their `Download status - ` title
+/// prefix (the filename can change between frames) and the known dialogs by
+/// exact title. Returns how many matching windows were found so the caller
+/// can retry while one is still being created.
+#[cfg(windows)]
+pub fn refresh_popup_hooks() -> usize {
+    wakeup::refresh_popup_hooks()
+}
+
+#[cfg(not(windows))]
+pub fn refresh_popup_hooks() -> usize {
     0
 }
-
-/// Make all download progress popout windows unowned so they don't
-/// get minimized when the main window is minimized.
-#[cfg(windows)]
-pub fn unown_popouts() {
-    wakeup::unown_popouts()
-}
-
-#[cfg(not(windows))]
-pub fn unown_popouts() {}
 
 #[cfg(windows)]
 mod wakeup {
     use std::collections::HashMap;
     use std::ffi::c_int;
-    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     #[repr(C)]
@@ -970,10 +1018,36 @@ mod wakeup {
     }
 
     const WM_SIZE: u32 = 0x0005;
+    const WM_ACTIVATE: u32 = 0x0006;
+    const WM_SYSCOMMAND: u32 = 0x0112;
     const SIZE_RESTORED: usize = 0;
     const SIZE_MAXIMIZED: usize = 2;
     /// `WPF_RESTORETOMAXIMIZED`: the window was maximized before minimizing.
     const WPF_RESTORE_TO_MAXIMIZED: u32 = 0x0002;
+
+    const SC_MINIMIZE: usize = 0xF020;
+    const SC_RESTORE: usize = 0xF120;
+
+    const SW_HIDE: i32 = 0;
+    const SW_SHOW: i32 = 5;
+    const SW_RESTORE: i32 = 9;
+
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+
+    /// Where the window currently is, so "show" puts it back exactly there.
+    static PARK_RECT: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+    /// The main window is currently parked off-screen.
+    static PARKED: AtomicBool = AtomicBool::new(false);
+    /// We added `WS_EX_TOOLWINDOW` ourselves and must remove it on restore.
+    static PARK_TOOL_ADDED: AtomicBool = AtomicBool::new(false);
+    /// `0` = taskbar, `1` = taskbar+tray, `2` = tray only.
+    static MAIN_MODE: AtomicU8 = AtomicU8::new(1);
+    /// A progress/dialog child window is open right now.
+    static POPOUT_OPEN: AtomicBool = AtomicBool::new(false);
+    /// Original window procedure of the main window (0 until installed).
+    static MAIN_PREV: AtomicIsize = AtomicIsize::new(0);
 
     #[link(name = "user32")]
     unsafe extern "system" {
@@ -984,7 +1058,6 @@ mod wakeup {
         pub(super) fn IsWindowVisible(hwnd: isize) -> c_int;
         pub(super) fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
         fn SetForegroundWindow(hwnd: isize) -> c_int;
-        pub(super) fn InvalidateRect(hwnd: isize, rect: isize, erase: i32) -> i32;
         pub(super) fn SetWindowLongPtrW(hwnd: isize, index: i32, new_long: isize) -> isize;
         fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
         pub(super) fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
@@ -992,6 +1065,16 @@ mod wakeup {
         fn DefWindowProcW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
         fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> c_int;
         fn IsWindow(hwnd: isize) -> c_int;
+        fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> c_int;
+        fn SetWindowPos(
+            hwnd: isize,
+            insert_after: isize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> c_int;
     }
 
     extern "system" fn find_main(hwnd: isize, found: isize) -> i32 {
@@ -1082,11 +1165,6 @@ mod wakeup {
         unsafe { IsIconic(hwnd) != 0 || IsWindowVisible(hwnd) == 0 }
     }
 
-    /// True when the window is iconic (minimized to the taskbar).
-    pub(super) fn is_iconic(hwnd: isize) -> bool {
-        unsafe { IsIconic(hwnd) != 0 }
-    }
-
     /// Ask winit/eframe for one frame without changing the real window size.
     pub(super) fn post_resize(hwnd: isize) {
         let mut placement = WindowPlacement {
@@ -1115,74 +1193,236 @@ mod wakeup {
         }
     }
 
-    /// Force a repaint of a window by invalidating its client area.
-    pub(super) fn invalidate(hwnd: isize) {
-        unsafe {
-            InvalidateRect(hwnd, 0, 0);
-        }
-    }
-
-    /// Hide a window at the Win32 level only (no eframe involvement).
+    /// Park the main window off-screen while keeping it `WS_VISIBLE` and
+    /// non-iconic, so eframe keeps scheduling frames for the child popouts.
     ///
-    /// The GUI must never hide the MAIN window with eframe's
-    /// `ViewportCommand::Visible(false)`: once eframe believes the main window
-    /// is invisible, winit stops pumping *queued* Win32 messages for the child
-    /// progress popouts, so their title-bar X, buttons and drag become dead
-    /// (the "frozen popout" bug). A raw `ShowWindow(SW_HIDE)` hides the window
-    /// from the user while eframe still thinks it is visible, so the popouts
-    /// stay fully interactive. Confirmed by test: with the main window hidden
-    /// this way, a posted `WM_CLOSE` reaches the popout's subclass and a real
-    /// mouse click on its Close button is delivered, exactly as when the main
-    /// window is on screen.
-    pub(super) fn hide(hwnd: isize) {
-        const SW_HIDE: i32 = 0;
+    /// `no_taskbar` adds `WS_EX_TOOLWINDOW` (tray-only / background launch).
+    pub(super) fn park(no_taskbar: bool) {
+        let Some(hwnd) = main_window() else {
+            return;
+        };
+        let already = PARKED.load(Ordering::Relaxed);
+        let iconic = unsafe { IsIconic(hwnd) != 0 };
+        let has_tool = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) }
+            & (WS_EX_TOOLWINDOW as isize)
+            != 0;
+
+        // Idempotent fast path: already parked exactly the way we want.
+        if already
+            && !iconic
+            && has_tool == no_taskbar
+            && unsafe { IsWindowVisible(hwnd) } != 0
+            && PARK_RECT.lock().map(|slot| slot.is_some()).unwrap_or(false)
+        {
+            return;
+        }
+
+        // Restore first: an iconic window cannot be moved reliably.
+        if iconic {
+            unsafe {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+        }
+
+        if !already {
+            let mut rect = Rect::default();
+            if unsafe { GetWindowRect(hwnd, &mut rect) } != 0 && rect.left > -10_000 {
+                if let Ok(mut slot) = PARK_RECT.lock() {
+                    *slot = Some((rect.left, rect.top));
+                }
+            }
+        }
+
+        if no_taskbar && !has_tool {
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style(hwnd) | WS_EX_TOOLWINDOW as isize);
+            }
+            PARK_TOOL_ADDED.store(true, Ordering::Relaxed);
+        } else if !no_taskbar && PARK_TOOL_ADDED.load(Ordering::Relaxed) {
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style(hwnd) & !(WS_EX_TOOLWINDOW as isize));
+            }
+            PARK_TOOL_ADDED.store(false, Ordering::Relaxed);
+        }
+
+        // A style change only reaches the taskbar after a show/hide cycle.
+        // Both happen at the parked position, so nothing is ever visible.
+        if no_taskbar != has_tool && !already {
+            unsafe {
+                ShowWindow(hwnd, SW_HIDE);
+                ShowWindow(hwnd, SW_SHOW);
+            }
+        }
+
         unsafe {
-            ShowWindow(hwnd, SW_HIDE);
+            SetWindowPos(hwnd, 0, -32000, -32000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        PARKED.store(true, Ordering::Relaxed);
+        if !already {
+            debug_log(&format!("main window parked (toolwindow={no_taskbar})"));
         }
     }
 
-    /// Show/restore a window hidden by [`hide`].
-    pub(super) fn show(hwnd: isize) {
-        const SW_SHOW: i32 = 5;
-        const SW_RESTORE: i32 = 9;
-        unsafe {
-            if IsIconic(hwnd) != 0 {
+    /// Bring a parked (or genuinely minimized) main window back on screen.
+    pub(super) fn unpark() {
+        let Some(hwnd) = main_window() else {
+            return;
+        };
+        let was_parked = PARKED.swap(false, Ordering::Relaxed);
+
+        if PARK_TOOL_ADDED.swap(false, Ordering::Relaxed) {
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style(hwnd) & !(WS_EX_TOOLWINDOW as isize));
+                ShowWindow(hwnd, SW_HIDE);
+                ShowWindow(hwnd, SW_SHOW);
+            }
+        }
+        if unsafe { IsIconic(hwnd) } != 0 {
+            unsafe {
                 ShowWindow(hwnd, SW_RESTORE);
-            } else {
+            }
+        }
+        if was_parked {
+            let saved = PARK_RECT.lock().ok().and_then(|slot| *slot);
+            if let Some((x, y)) = saved {
+                unsafe {
+                    SetWindowPos(hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+            }
+            if let Ok(mut slot) = PARK_RECT.lock() {
+                *slot = None;
+            }
+        }
+        unsafe {
+            if IsWindowVisible(hwnd) == 0 {
                 ShowWindow(hwnd, SW_SHOW);
             }
             SetForegroundWindow(hwnd);
         }
+        if was_parked {
+            debug_log("main window restored from the park position");
+        }
     }
 
-    /// Subclass the popout windows so their title-bar X (and Alt+F4) hides
-    /// them immediately, without waiting for eframe's frame scheduling.
+    pub(super) fn is_parked() -> bool {
+        PARKED.load(Ordering::Relaxed)
+    }
+
+    /// Restore+park a genuinely iconic main window (a popout was opened
+    /// while it was minimized to the taskbar).
+    pub(super) fn wake_for_popouts() {
+        let Some(hwnd) = main_window() else {
+            return;
+        };
+        if unsafe { IsIconic(hwnd) } == 0 {
+            return;
+        }
+        debug_log("popout opened while the main window was iconic; parking it");
+        park(false);
+    }
+
+    fn ex_style(hwnd: isize) -> isize {
+        unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) }
+    }
+
+    /// Install the main-window hook once, then report state to it.
+    pub(super) fn install_main_hook() {
+        if MAIN_PREV.load(Ordering::Relaxed) != 0 {
+            return;
+        }
+        let Some(hwnd) = main_window() else {
+            return;
+        };
+        let prev =
+            unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, main_subclass_proc as *const () as isize) };
+        if prev != 0 {
+            MAIN_PREV.store(prev, Ordering::Relaxed);
+            debug_log("main window subclass installed");
+        }
+    }
+
+    pub(super) fn set_main_mode(mode: &str) {
+        let value = match mode {
+            "taskbar" => 0,
+            "tray" => 2,
+            _ => 1,
+        };
+        MAIN_MODE.store(value, Ordering::Relaxed);
+    }
+
+    pub(super) fn set_popout_open(open: bool) {
+        POPOUT_OPEN.store(open, Ordering::Relaxed);
+    }
+
+    /// The minimize button is intercepted before winit/eframe can make the
+    /// root iconic (eframe does not schedule repaints for iconic windows, and
+    /// immediate popouts are painted by the root frame).
+    extern "system" fn main_subclass_proc(
+        hwnd: isize,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> isize {
+        let prev = MAIN_PREV.load(Ordering::Relaxed);
+        if prev == 0 {
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
+
+        if msg == WM_SYSCOMMAND {
+            let cmd = wparam & 0xFFF0;
+            if cmd == SC_MINIMIZE {
+                let mode = MAIN_MODE.load(Ordering::Relaxed);
+                let child = POPOUT_OPEN.load(Ordering::Relaxed);
+                // Tray modes always park. Plain taskbar mode parks only while
+                // a popout is open, because the popout needs the root frame.
+                if mode != 0 || child {
+                    debug_log("minimize intercepted; parking the main window");
+                    park(mode == 2);
+                    return 0;
+                }
+            } else if cmd == SC_RESTORE && PARKED.load(Ordering::Relaxed) {
+                unpark();
+                return 0;
+            }
+        } else if msg == WM_ACTIVATE
+            && PARKED.load(Ordering::Relaxed)
+            && (wparam & 0xFFFF) != 0
+        {
+            // Taskbar button click, Alt+Tab, tray restore.
+            unpark();
+            return 0;
+        }
+
+        unsafe { CallWindowProcW(prev, hwnd, msg, wparam, lparam) }
+    }
+
+    fn debug_log(msg: &str) {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        if *ENABLED.get_or_init(|| std::env::var_os("DMULTRA_DEBUG").is_some()) {
+            crate::logfile::log("WIN", msg);
+        }
+    }
+
+    /// Subclass every popout window that currently exists so its title-bar X
+    /// (and Alt+F4) hides it immediately, without waiting for eframe's frame
+    /// scheduling, and un-own the download progress windows so they cannot be
+    /// minimized together with the main window.
     ///
-    /// eframe paints a child viewport from the parent's frame, so a close
-    /// request needs a parent round-trip (~300 ms) before the window
-    /// disappears. Hiding it here, inside `WM_CLOSE`, is immediate; the
-    /// message is then passed on so winit still reports `CloseRequested` and
-    /// the app drops the viewport as usual.
+    /// Download windows are matched by title *prefix* (`Download status - `),
+    /// not by exact title: the filename in the title can change (e.g.
+    /// `blob (1).bin`) and a recreated window must be hooked again. The known
+    /// dialogs are matched by exact title.
     ///
-    /// `titles` are the exact titles of the popout windows that are currently
-    /// open. Only windows owned by this process are considered, and all of
-    /// them are hooked - several progress windows can legitimately share the
-    /// same title ("Download status - blob.bin"), and `FindWindowW` alone only
-    /// ever returns the first one, leaving the rest without an instant close.
-    ///
-    /// Returns how many of those windows currently exist, so the caller can
-    /// retry while one is still being created. Enumerating windows is far
-    /// too expensive to do every frame.
-    pub(super) fn subclass_popups(titles: &[String]) -> usize {
+    /// Returns how many matching windows were found, so the caller can retry
+    /// while one is still being created. The caller throttles this to a few
+    /// times per second - enumerating windows every frame is far too costly.
+    pub(super) fn refresh_popup_hooks() -> usize {
         struct HookScan {
-            titles: *const String,
-            len: usize,
             found: usize,
         }
 
         extern "system" fn hook_scan(hwnd: isize, lparam: isize) -> i32 {
             let scan = unsafe { &mut *(lparam as *mut HookScan) };
-            let titles = unsafe { std::slice::from_raw_parts(scan.titles, scan.len) };
             let mut pid: u32 = 0;
             unsafe {
                 GetWindowThreadProcessId(hwnd, &mut pid);
@@ -1196,78 +1436,51 @@ mod wakeup {
                 return 1;
             }
             let title = String::from_utf16_lossy(&buf[..len as usize]);
-            if !titles.iter().any(|wanted| wanted == &title) {
-                return 1;
+            let is_download = title.starts_with("Download status - ");
+            let is_dialog = matches!(
+                title.as_str(),
+                "Options" | "Add new download..." | "Confirm Delete" | "Scheduler" | "Site Grabber"
+            );
+            if is_download {
+                scan.found += 1;
+                hook_window(hwnd);
+                make_unowned(hwnd);
+            } else if is_dialog {
+                scan.found += 1;
+                hook_window(hwnd);
             }
-            scan.found += 1;
-            hook_window(hwnd);
             1
         }
 
-        if titles.is_empty() {
-            return 0;
-        }
-        let mut scan = HookScan {
-            titles: titles.as_ptr(),
-            len: titles.len(),
-            found: 0,
-        };
+        let mut scan = HookScan { found: 0 };
         unsafe {
             EnumWindows(hook_scan, &mut scan as *mut HookScan as isize);
         }
         scan.found
     }
 
-    /// Make all download progress popout windows unowned so they don't
-    /// get minimized when the main window is minimized.
-    pub(super) fn unown_popouts() {
-        struct UnownScan {
-            count: usize,
-        }
-
-        extern "system" fn unown_scan(hwnd: isize, lparam: isize) -> i32 {
-            let scan = unsafe { &mut *(lparam as *mut UnownScan) };
-            let mut pid: u32 = 0;
-            unsafe {
-                GetWindowThreadProcessId(hwnd, &mut pid);
-            }
-            if pid != std::process::id() {
-                return 1;
-            }
-            let mut buf = [0u16; 512];
-            let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
-            if len <= 0 {
-                return 1;
-            }
-            let title = String::from_utf16_lossy(&buf[..len as usize]);
-            // Match download status popouts
-            if title.starts_with("Download status - ") {
-                scan.count += 1;
-                make_unowned(hwnd);
-            }
-            1
-        }
-
-        let mut scan = UnownScan { count: 0 };
-        unsafe {
-            EnumWindows(unown_scan, &mut scan as *mut UnownScan as isize);
-        }
-    }
-
     /// Install the instant-close subclass on one window (once).
+    ///
+    /// A handle that was destroyed and re-created must be hooked again, so
+    /// stale entries are pruned instead of trusted forever.
     fn hook_window(hwnd: isize) {
-        let known = hooked()
-            .lock()
-            .map(|map| map.contains_key(&hwnd))
-            .unwrap_or(true);
-        if known {
+        if let Ok(mut map) = hooked().lock() {
+            if let Some(previous) = map.get(&hwnd).copied() {
+                if previous != 0 && unsafe { IsWindow(hwnd) } != 0 {
+                    return;
+                }
+                map.remove(&hwnd);
+            }
+        } else {
             return;
         }
-        let previous = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_proc as isize) };
+        let previous =
+            unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_proc as *const () as isize) };
         if previous != 0 {
             if let Ok(mut map) = hooked().lock() {
                 map.insert(hwnd, previous);
             }
+            debug_log("popout hook installed");
         }
     }
 
@@ -1278,17 +1491,22 @@ const GWL_EXSTYLE: i32 = -20;
 const WS_EX_TOOLWINDOW: i32 = 0x00000080;
 
     /// Make a window unowned (independent) so it doesn't get minimized
-    /// when its owner window is minimized.
+    /// when its owner window is minimized. Idempotent: the periodic refresh
+    /// calls this several times per second.
     pub(super) fn make_unowned(hwnd: isize) {
         unsafe {
-            // Remove owner by setting parent to 0
-            SetWindowLongPtrW(hwnd, GWL_HWNDPARENT, 0);
-            // Also set TOOLWINDOW style so it doesn't appear in taskbar
+            let owner = GetWindowLongPtrW(hwnd, GWL_HWNDPARENT);
             let exstyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exstyle | WS_EX_TOOLWINDOW as isize);
+            let has_tool = exstyle & WS_EX_TOOLWINDOW as isize != 0;
+            if owner != 0 {
+                SetWindowLongPtrW(hwnd, GWL_HWNDPARENT, 0);
+            }
+            if !has_tool {
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exstyle | WS_EX_TOOLWINDOW as isize);
+            }
             // If the window is currently minimized, restore it
             if IsIconic(hwnd) != 0 {
-                ShowWindow(hwnd, 9); // SW_RESTORE
+                ShowWindow(hwnd, SW_RESTORE);
             }
         }
     }
@@ -1317,6 +1535,7 @@ const WS_EX_TOOLWINDOW: i32 = 0x00000080;
         if msg == WM_CLOSE {
             // Hide first: this is the whole point (instant close). The
             // message is still forwarded so the close is fully processed.
+            debug_log("popout WM_CLOSE -> hidden");
             unsafe {
                 ShowWindow(hwnd, SW_HIDE);
             }
