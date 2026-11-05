@@ -785,28 +785,39 @@ pub fn spawn_busy_waker(
                 let watch = watch_minimize.load(Ordering::Relaxed);
                 let current_seq = frame_seq.load(Ordering::Relaxed);
 
-                // The previous wake has been satisfied once a frame completed
-                // after it was posted. The timeout is a safety net for a wake
-                // that winit coalesced away without running a frame.
+                let iconic = wakeup::is_iconic(hwnd);
+                let needs_wake_now = wakeup::needs_wake(hwnd);
+
+                // Self-clocking is disabled for minimized windows because eframe
+                // skips frames for them, so frame_seq never advances. Instead we
+                // post at a fixed rate (every 100 ms) when active. For non-iconic
+                // windows we keep self-clocking to avoid queue buildup.
+                let self_clock = !iconic;
+
                 if let Some(seq) = awaiting_seq {
-                    if current_seq != seq
-                        || wake_posted.elapsed() >= std::time::Duration::from_secs(2)
-                    {
+                    let frame_advanced = current_seq != seq;
+                    let timeout = if self_clock {
+                        std::time::Duration::from_secs(2)
+                    } else {
+                        std::time::Duration::from_millis(150)
+                    };
+                    if frame_advanced || wake_posted.elapsed() >= timeout {
                         awaiting_seq = None;
                     }
                 }
 
-                let active = (busy_now || watch && wakeup::is_iconic(hwnd))
-                    && wakeup::needs_wake(hwnd);
+                let active = (busy_now || watch && iconic) && needs_wake_now;
 
                 if active {
                     if awaiting_seq.is_none() {
                         wakeup::post_resize(hwnd);
-                        awaiting_seq = Some(current_seq);
+                        if self_clock {
+                            awaiting_seq = Some(current_seq);
+                        }
                         wake_posted = std::time::Instant::now();
                         last_idle_wake = wake_posted;
                     }
-                } else if wakeup::needs_wake(hwnd)
+                } else if needs_wake_now
                     && last_idle_wake.elapsed() >= std::time::Duration::from_millis(500)
                 {
                     // Slow idle pulse for a hidden window (scheduler, tray
@@ -914,6 +925,16 @@ pub fn subclass_popups(_titles: &[String]) -> usize {
     0
 }
 
+/// Make all download progress popout windows unowned so they don't
+/// get minimized when the main window is minimized.
+#[cfg(windows)]
+pub fn unown_popouts() {
+    wakeup::unown_popouts()
+}
+
+#[cfg(not(windows))]
+pub fn unown_popouts() {}
+
 #[cfg(windows)]
 mod wakeup {
     use std::collections::HashMap;
@@ -965,6 +986,7 @@ mod wakeup {
         fn SetForegroundWindow(hwnd: isize) -> c_int;
         pub(super) fn InvalidateRect(hwnd: isize, rect: isize, erase: i32) -> i32;
         pub(super) fn SetWindowLongPtrW(hwnd: isize, index: i32, new_long: isize) -> isize;
+        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
         pub(super) fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
         fn GetWindowPlacement(hwnd: isize, placement: *mut WindowPlacement) -> c_int;
         fn DefWindowProcW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
@@ -1196,6 +1218,42 @@ mod wakeup {
         scan.found
     }
 
+    /// Make all download progress popout windows unowned so they don't
+    /// get minimized when the main window is minimized.
+    pub(super) fn unown_popouts() {
+        struct UnownScan {
+            count: usize,
+        }
+
+        extern "system" fn unown_scan(hwnd: isize, lparam: isize) -> i32 {
+            let scan = unsafe { &mut *(lparam as *mut UnownScan) };
+            let mut pid: u32 = 0;
+            unsafe {
+                GetWindowThreadProcessId(hwnd, &mut pid);
+            }
+            if pid != std::process::id() {
+                return 1;
+            }
+            let mut buf = [0u16; 512];
+            let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+            if len <= 0 {
+                return 1;
+            }
+            let title = String::from_utf16_lossy(&buf[..len as usize]);
+            // Match download status popouts
+            if title.starts_with("Download status - ") {
+                scan.count += 1;
+                make_unowned(hwnd);
+            }
+            1
+        }
+
+        let mut scan = UnownScan { count: 0 };
+        unsafe {
+            EnumWindows(unown_scan, &mut scan as *mut UnownScan as isize);
+        }
+    }
+
     /// Install the instant-close subclass on one window (once).
     fn hook_window(hwnd: isize) {
         let known = hooked()
@@ -1215,6 +1273,25 @@ mod wakeup {
 
     /// `GWLP_WNDPROC`: index of the window-procedure pointer.
     const GWLP_WNDPROC: i32 = -4;
+const GWL_HWNDPARENT: i32 = -8;
+const GWL_EXSTYLE: i32 = -20;
+const WS_EX_TOOLWINDOW: i32 = 0x00000080;
+
+    /// Make a window unowned (independent) so it doesn't get minimized
+    /// when its owner window is minimized.
+    pub(super) fn make_unowned(hwnd: isize) {
+        unsafe {
+            // Remove owner by setting parent to 0
+            SetWindowLongPtrW(hwnd, GWL_HWNDPARENT, 0);
+            // Also set TOOLWINDOW style so it doesn't appear in taskbar
+            let exstyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exstyle | WS_EX_TOOLWINDOW as isize);
+            // If the window is currently minimized, restore it
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, 9); // SW_RESTORE
+            }
+        }
+    }
 
     /// Original window procedures, keyed by window.
     fn hooked() -> &'static Mutex<HashMap<isize, isize>> {

@@ -2013,8 +2013,18 @@ impl eframe::App for DmApp {
         };
         // The waker delivers the frame that notices a minimize; eframe cannot
         // schedule one by itself for an iconic window.
+        // For tray-mode, wake when the window is minimized to the tray.
+        // For taskbar-mode, also wake when minimized if a child window is open,
+        // so popouts stay responsive even when the main window is minimized.
+        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        let has_child = !self.active_details_popouts.is_empty()
+            || self.add_dialog.open
+            || self.settings_dialog.open
+            || self.scheduler_dialog.open
+            || self.grabber_dialog.running
+            || self.about_open;
         self.minimize_watch.store(
-            effective_mode == "tray" && self.show_main_window,
+            (effective_mode == "tray" || (minimized && has_child)) && self.show_main_window,
             std::sync::atomic::Ordering::Relaxed,
         );
 
@@ -2053,7 +2063,6 @@ impl eframe::App for DmApp {
 
         // Minimize button: tray-only hides the window (and with it the
         // taskbar button). The other modes keep normal taskbar behaviour.
-        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
         if minimized && !self.was_minimized && self.show_main_window && effective_mode == "tray" {
             self.show_main_window = false;
             // Un-minimize before hiding: eframe refuses to schedule frames
@@ -3222,6 +3231,9 @@ impl eframe::App for DmApp {
             self.hook_signature = signature;
             self.hook_pending = found < expected;
         }
+
+        // Make popout windows unowned so they don't get minimized with the main window
+        crate::browser::unown_popouts();
 
         // Immediate viewports (progress windows, dialogs) are painted by the
         // parent window's frame. eframe does not schedule frames for a
