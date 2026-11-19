@@ -7,12 +7,13 @@ in version X". Newest first. Status column: `released` = tagged and published,
 
 ## Unreleased
 
-- Nothing pending. The newest release is v0.075.
+- Nothing pending. The newest release is v0.076.
 
 ## Released history
 
 | Version | Status | Headline |
 |---|---|---|
+| v0.076 | tagged + zip | Window dragging is no longer capped at ~5 fps: the Win32 window sweep is cached and skipped inside the modal move loop. Measured with a progress window open: 402 ms -> 0.6 ms per frame, 3 -> 40 frames during one title-bar drag, popout close latency 288 ms -> 4 ms. |
 | v0.075 | tagged + zip | Extension: attach the video observer only once `documentElement` exists, label streams with the playing resolution, send the 2 s overlay heartbeat `overlay.rs` expects; `EXT_VERSION` now comes from `CARGO_PKG_VERSION` (D-014 closed). |
 | v0.074 | tagged + zip `385cc3a` | Status window "Open" uses the shell open verb; no stderr writes in a GUI exe; panic hook writes `panic.log`. |
 | v0.073 | tagged `dff3be5` | Park the main window off-screen so popouts stay interactive. |

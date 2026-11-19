@@ -199,13 +199,13 @@
   core sat at ~45%.
 - The busy-waker is now self-clocking: it re-posts a wake only after the
   app has consumed the previous one (a frame completed, counted by the new
-  rame_seq atomic) with a 2-second fallback. Queue depth is bounded to
+  `frame_seq` atomic) with a 2-second fallback. Queue depth is bounded to
   one wake in flight; frames stay ~5/s and input latency drops from
   minutes to under 200 ms. Measured: WM_CLOSE handled in ~190 ms, CPU
   ~2% of one core (was ~45%) with the main window hidden.
-- Safety: state.rs no longer uses println!. The release binary is a
+- Safety: state.rs no longer uses `println!`. The release binary is a
   Windows GUI-subsystem program with no console, so a stderr write fails
-  and println! panics, aborting the whole process; that path now logs
+  and `println!` panics, aborting the whole process; that path now logs
   to the rotating log file. A panic hook writes panic.log under the
   app data dir so a future crash is visible instead of silent.
 - Diagnostics: optional [DEBUG_HOOK] / popout-button lines are written
@@ -284,3 +284,67 @@
 - Measured: extension 9/9, Rust 29/29, `build.ps1 check` 0 errors, release build
   0 errors / 80 warnings (baseline), `dmultra.exe` 15,606,784 B and
   `dmultra-nmh.exe` 506,880 B rebuilt 2026-11-19 and copied to `C:\dmultra`.
+
+## v0.076 (released 2026-11-19)
+- Window dragging is smooth now, and the drag was never what was slow.
+  `apply_titlebar_theme` ran `EnumWindows` once per frame to find the windows it
+  had to paint with the theme. `EnumWindows` walks the top-level windows of every
+  process on the desktop and blocks inside win32k: on this machine one sweep of
+  ~340 windows costs ~200 ms. Every frame therefore cost ~200 ms (~5 fps), and
+  ~400 ms while a progress popout was open, because the popout hook refresh swept
+  too. Windows runs a title-bar drag in a modal message loop on the GUI thread, so
+  the drag could only advance once per frame - that is the choppiness, and the same
+  200-400 ms frame is why clicks seemed to be ignored. (DECISIONS.md D-021.)
+- The sweep is cached: `native_win::ChromeCache` holds the window list, the theme
+  signature last applied to each window and when the last sweep ran. A new sweep
+  runs only when the live count of our windows disagrees with the count the app
+  believes is open (`1 + expected`), the palette signature changed, or 100 ms have
+  elapsed. Dead windows are dropped with `IsWindow`, DWM attributes go only to
+  windows that have not already received this exact theme, and `window_rect` uses
+  the same cache instead of sweeping every call.
+- While a window of ours is inside the move loop (`WM_ENTERSIZEMOVE` ..
+  `WM_EXITSIZEMOVE`/`WM_CAPTURECHANGED`, already exported as
+  `browser::main_window_dragging()` since v0.074 but unused until now) the frame
+  paints only: the pending browser queue, clipboard watcher, speed sampling,
+  scheduler tick, overlay heartbeat, main-window and popout position saves, the
+  popout hook sweep and the theme sweep are all deferred to the first frame after
+  the drag. A hook-set change seen during the drag sets `hook_pending` and is done
+  once the drag ends, so a popout opened during a drag is still themed and hooked.
+- Double-clicking a row now uses the user's own double-click speed:
+  `GetDoubleClickTime` (500 ms default) via `native_win::double_click_interval()`,
+  paired in `DmApp::last_row_click` and opened through the new
+  `DmApp::open_progress_popout`. egui's `double_clicked()` needs the second press
+  within 300 ms measured between frames, so with 200-400 ms frames it rejected a
+  normal double-click and the status window never opened. (D-022.)
+- New tracked harness `test-window-drag-profile.ps1`: drags the caption with real
+  mouse input and prints frame cost per mode (idle / ui / drag) from
+  `DMULTRA_PROFILE=1` lines written by `logfile::profile_frame`. It finds the
+  caption with `WM_NCHITTEST` and checks `WindowFromPoint`, because `GetWindowRect`
+  includes the invisible resize border and another application's window over the
+  caption steals the synthesized click - Excel did exactly that, which is why the
+  first runs reported no drag frames at all. It falls back to a posted
+  `WM_NCLBUTTONDOWN` when our window is not topmost.
+- Measured on this machine, same script, same desktop, before and after:
+
+  | situation | v0.075 | v0.076 |
+  |---|---|---|
+  | plain window, dragging | 5 frames @ 200.5 ms | 40 frames @ 0.2 ms |
+  | plain window, idle | 27 frames @ 207.9 ms (median 200.6) | 35 frames @ 9.2 ms (median 0.7) |
+  | progress window open, dragging | 3 frames @ 402.7 ms | 40 frames @ 0.6 ms |
+  | progress window open, live | 18 frames @ 375.7 ms (median 402.2) | 114 frames @ 10.7 ms (median 0.8) |
+  | popout close latency (same run) | 288 ms | 4 ms |
+
+- Regression scripts run against the deployed v0.076: `test-main-window-placement.ps1`
+  7/7 PASS, `test-startup-registry.ps1` 6/6 PASS, `test-minimize-modes.ps1` 8 PASS /
+  3 FAIL, `test-minimized-progress.ps1` 3 PASS / 3 FAIL, `test-minimized-capture.ps1`
+  throws at its minimize step. The minimize failures are pre-existing, not caused by
+  this change: `test-minimized-progress.ps1` fails the identical three checks on the
+  v0.075 binary (proven by running it against the saved 0.075 exe), and those three
+  scripts still assert an *iconic* minimize, which v0.073's park-off-screen design
+  (D-007) deliberately replaced whenever a popout is open or a tray mode is set.
+  `test-single-instance.ps1` looked for `dmultra.exe` in the repo root (a pre-cleanup
+  layout) and now points at the deployed `C:\dmultra\dmultra.exe`.
+- Green: `build.ps1 check` 0 errors / 80 warnings (baseline), `build.ps1 test` 29/29,
+  `node --test` 9/9, `checkpoint.ps1 verify` exit 0. Release build 0 errors;
+  `dmultra.exe` 16,652,288 B and `dmultra-nmh.exe` 519,680 B built 2026-11-19 14:41
+  and copied to `C:\dmultra`; file version 0.28.2.0 (package version, D-014).

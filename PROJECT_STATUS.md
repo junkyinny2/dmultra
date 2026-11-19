@@ -12,7 +12,7 @@ Resume order for a new conversation (do not ask the user to re-explain the proje
    history (it is the source of truth for what shipped; `PARITY_PLAN.md` checkboxes
    are stale for phases 2-8).
 
-Last checkpoint: 2026-11-19 10:44 - checkpoint.ps1 now resolves the derived extension version [git 0a3764a master, dirty=2, VERSION 0.075]
+Last checkpoint: 2026-11-19 15:26 - v0.076 released: cached window sweep + drag fast path (402 ms -> 0.6 ms/frame), double-click via GetDoubleClickTime, drag-profile harness proven [git 74ad8ad master, dirty=5, VERSION 0.076]
 Refresh: `.\checkpoint.ps1 save -Note "what just changed"`
 Briefing: `.\checkpoint.ps1 status`
 Self-check: `.\checkpoint.ps1 verify` (fails if a memory file is missing, thin or stale)
@@ -45,14 +45,16 @@ no plugins, no BitTorrent, no eD2K, no accounts, no API service. Two binaries:
 | Check | Result |
 |---|---|
 | `.\build.ps1 check` | `Finished`, 0 errors, 80 warnings (the accepted baseline). |
-| `.\build.ps1 test` | **29 passed, 0 failed** - the manifest-version test is green and can no longer drift. |
-| `node --test browser-extension/background.test.js browser-extension/content.test.js` | **9 pass, 0 fail** (the three known failures are fixed). |
-| Release binaries | `target\release\dmultra.exe` 15,606,784 B and `dmultra-nmh.exe` 506,880 B, built 2026-11-19 10:12-10:15 and copied to `C:\dmultra`. The new extension code is verified inside the deployed exe. |
-| Version strings | `Cargo.toml` 0.28.2 = `EXT_VERSION` (`env!("CARGO_PKG_VERSION")`) = generated and on-disk extension manifest 0.28.2. `VERSION` 0.075 is the release counter (title bar, About, tags) and is deliberately independent of the package version - see D-014. |
-| Git | On `master`, reached with `git checkout --ignore-other-worktrees master`: the branch was locked to the stale `C:/dmultra/unused` worktree, which is why HEAD was detached. Tags `v0.074` (`385cc3a`) and `v0.075`. `unused/` and `reference/` are ignored (D-019); the six `test-*.ps1` are tracked again. Remote `https://github.com/junkyinny2/dmultra.git`; other branch `tauri-gui` (abandoned non-egui GUI). |
-| Release zips | `C:\dmultra\unused\releases\dmultra-v0.074-20261119.zip` (105 entries incl. both v0.074 exes) and `dmultra-v0.075-20261119.zip`. |
+| `.\build.ps1 test` | **29 passed, 0 failed** - re-run 2026-11-19 after the v0.076 change. |
+| `node --test browser-extension/background.test.js browser-extension/content.test.js` | **9 pass, 0 fail**. |
+| Frame cost by mode (`test-window-drag-profile.ps1`, v0.076) | idle median 0.7 ms, live median 0.8 ms, dragging 0.2 ms plain and 0.6 ms with a progress window open. The same script on v0.075 measured 200.6 ms idle, 402.2 ms live and 200-403 ms while dragging (3-5 frames per drag instead of 40). |
+| GUI end-to-end scripts (v0.076) | placement 7/7, startup-registry 6/6, single-instance 4/4 (after fixing its exe path), minimize-modes 8/11, minimized-progress 3/6, minimized-capture throws at its minimize step. The minimize failures are pre-existing - proven by running minimized-progress against the saved v0.075 exe - because those scripts still assert an iconic minimize, which D-007 parking replaced. |
+| Release binaries | `target\release\dmultra.exe` 16,652,288 B and `dmultra-nmh.exe` 519,680 B, built 2026-11-19 14:41 and copied to `C:\dmultra`. File/ProductVersion 0.28.2.0. The previous binary is kept at `C:\dmultra\unused\dmultra-baseline-v0075.exe` for A/B measurement. |
+| Version strings | `Cargo.toml` 0.28.2 = `EXT_VERSION` (`env!("CARGO_PKG_VERSION")`) = generated and on-disk extension manifest 0.28.2. `VERSION` 0.076 is the release counter (title bar, About, tags) and is deliberately independent of the package version - see D-014. |
+| Git | On `master`, reached with `git checkout --ignore-other-worktrees master`: the branch was locked to the stale `C:/dmultra/unused` worktree, which is why HEAD was detached. Tags `v0.074` (`385cc3a`), `v0.075`, `v0.076`. `unused/` and `reference/` are ignored (D-019); the seven `test-*.ps1` scripts are tracked. Remote `https://github.com/junkyinny2/dmultra.git`; other branch `tauri-gui` (abandoned non-egui GUI). |
+| Release zips | `C:\dmultra\unused\releases\dmultra-v0.074-20261119.zip`, `dmultra-v0.075-20261119.zip` and `dmultra-v0.076-20261119.zip` - each the source tree plus both exes under a `dmultra-vX.YYY/` folder (the v0.074 zip has 105 entries). |
 | Deployed browser integration | `C:\dmultra\browser-extension\` (`content.js` 15,325 B - the fixed version) plus `dmultra-chrome.zip/.crx` and `dmultra-firefox.xpi`, regenerated on 2026-11-19 by running `C:\dmultra\dmultra.exe browser`. That folder had been archived away by the folder cleanup; the extension has to be reloaded in the browser (chrome://extensions -> Reload) to pick up the new `content.js`. |
-| Published | Pushed 2026-11-19: `origin/master` moved `9ed1e8a -> de04574` and the 16 missing tags (`v0.041` .. `v0.075`) are on GitHub. Proof: `git --no-pager ls-remote --tags origin` lists `v0.075`. |
+| Published | Pushed 2026-11-19: `origin/master` moved `9ed1e8a -> de04574` and the 16 missing tags (`v0.041` .. `v0.075`) are on GitHub; the v0.076 commit and tag are pushed with it. Proof: `git --no-pager ls-remote --tags origin` lists `v0.076`. |
 
 ## 4. Architecture (25 modules, `src/`, line counts as of 2026-11-18)
 
@@ -146,20 +148,30 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
 | 7.13 | Minimize to tray never took effect | Windows reports a minimize as a zero-sized resize, which eframe drops, so the app never saw the minimize | The frame waker also wakes the app while tray-only mode waits for the minimize (v0.051) |
 | 7.14 | Native messaging silently did nothing | Registry written to the Firefox-style `NativeMessaging\Hosts` path | Must be `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.dmultra.nm` (one word) |
 | 7.15 | Browser integration blocked on this machine | Defender ASR + AppContainer for NM hosts; `HKCU\Software\Policies` is ACL-locked | Keep the `C:\dmultra` exclusion and the ALL APPLICATION PACKAGES grants on `C:\dmultra` and the pending dir |
+| 7.16 | Dragging the window was choppy, clicks felt ignored, the app ran at ~5 fps | `apply_titlebar_theme` called `EnumWindows` once per frame; one sweep of ~340 top-level windows costs ~200 ms inside win32k on this machine, and Windows runs a title-bar drag in a modal loop on the GUI thread, so the drag could only advance one frame per step (~400 ms/step with a popout open) | Cache the sweep and skip it - plus the hook sweep and every file / registry / clipboard / state read - while `main_window_dragging()` is true (`gui.rs::native_win::ChromeCache`, v0.076, D-021). Measured 402 ms -> 0.6 ms per frame |
+| 7.17 | `test-window-drag-profile.ps1` said "no drag frames" and the window never moved | Not an app bug: `GetWindowRect` includes the invisible resize border, and Excel's window was sitting over the caption, so the synthesized click landed in Excel | The harness raises our window first, finds the caption with `WM_NCHITTEST`, verifies with `WindowFromPoint` + `GetAncestor`, and falls back to a posted `WM_NCLBUTTONDOWN` |
+| 7.18 | `test-single-instance.ps1` could not start: "cannot find C:\dmultra-base\dmultra.exe" | The script still pointed at the repo root, a pre-cleanup layout; the repo tree holds no binaries | Point it at the deployed `C:\dmultra\dmultra.exe` (v0.076) - 4/4 PASS after the change |
 
 ## 8. Exact next steps
 
-1. Run the six GUI end-to-end scripts (`test-minimized-progress.ps1`,
-   `test-minimized-capture.ps1`, `test-main-window-placement.ps1`,
-   `test-minimize-modes.ps1`, `test-single-instance.ps1`, `test-startup-registry.ps1`).
-   They are tracked again, they need the binaries deployed in `C:\dmultra`, and they are
-   the only end-to-end GUI checks this project has.
-2. Reload the browser extension so the v0.075 `content.js` in
+1. Reload the browser extension so the deployed `content.js` in
    `C:\dmultra\browser-extension` is the running one, then confirm the "Download this
-   video" button disappears within ~6 s of pausing or hiding the video (that is the new
-   2 s heartbeat plus `STALE_AFTER`).
-3. Only then pick the next feature from `PARITY_PLAN.md` (the live list is `TASKS.md` P1).
-4. At every milestone run `.\checkpoint.ps1 save -Note "..."`, keep `TASKS.md` and
+   video" button disappears within ~6 s of pausing or hiding the video (the 2 s heartbeat
+   plus `STALE_AFTER`).
+2. Fix the three end-to-end scripts that still assert an *iconic* minimize:
+   `test-minimize-modes.ps1` (3 tray checks), `test-minimized-progress.ps1` (3 checks)
+   and `test-minimized-capture.ps1` (it throws at its minimize step). Since v0.073 (D-007)
+   the app parks the window off-screen whenever a popout is open or a tray mode is set, so
+   those are a stale assumption rather than a regression - `test-minimized-progress.ps1`
+   fails the identical three checks against the saved v0.075 binary.
+3. Give `checkpoint.ps1` a `test` mode that runs `cargo test`, `node --test` and
+   `test-window-drag-profile.ps1` and prints one pass/fail line per suite, so a milestone
+   check is a single command.
+4. Only then pick the next feature from `PARITY_PLAN.md` (the live list is `TASKS.md` P1).
+5. Measure, never eyeball, any change to frame production:
+   `pwsh -NoProfile -File .\test-window-drag-profile.ps1` (add `-ChildUrl <url>` to drag
+   with a progress window open). v0.076 must stay at <= 1 ms per dragging frame (D-021).
+6. At every milestone run `.\checkpoint.ps1 save -Note "..."`, keep `TASKS.md` and
    `CHANGELOG.md` current, and `.\checkpoint.ps1 verify` must stay at exit 0.
 
 ## 9. Standing rules that override convenience
@@ -176,6 +188,7 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
   work is mid-flight.
 
 <!-- CHECKPOINT:BEGIN -->
+- 2026-11-19 15:26 | git 74ad8ad master dirty=5 | v0.076 released: cached window sweep + drag fast path (402 ms -> 0.6 ms/frame), double-click via GetDoubleClickTime, drag-profile harness proven
 - 2026-11-19 10:44 | git 0a3764a master dirty=2 | checkpoint.ps1 now resolves the derived extension version
 - 2026-11-19 10:36 | git de04574 master dirty=2 | post-release bookkeeping: publish and browser-integration reinstall recorded
 - 2026-11-19 10:26 | git 385cc3a master dirty=8 | v0.075: extension observer attach + resolution labels + 2s overlay heartbeat; EXT_VERSION from CARGO_PKG_VERSION (D-014 closed); v0.074 committed, tagged and zipped

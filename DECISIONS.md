@@ -185,6 +185,15 @@ Consequence: the button only disappears on time if the extension keeps sending -
 fold the 2 s heartbeat into the 3 s scan throttle, and never observe a root that may be
 null.
 
+### D-021 The Win32 window sweep is cached, and no file/registry/state work runs inside a modal move loop - locked (2026-11-19)
+`apply_titlebar_theme` and the popout hook refresh used to call `EnumWindows` once per frame. `EnumWindows` walks the top-level windows of every process and blocks inside win32k; measured on this machine one sweep of ~340 windows costs ~200 ms. Every frame therefore cost ~200 ms (~5 fps) and ~400 ms while a progress popout was open, and because Windows performs a title-bar drag in a modal message loop on the GUI thread, the drag could only advance once per frame - that was the choppy dragging and the "clicks feel delayed" report.
+The sweep result is now cached in `gui.rs::native_win::ChromeCache` (window list, the theme signature last applied to each window, and the time of the last scan). A new sweep runs only when the live count of our windows disagrees with the count the app itself believes is open, the palette signature changed, or 100 ms have passed; dead windows are dropped with `IsWindow`, and the DWM attributes are sent only to windows that have not already received this exact theme. `window_rect` reads the same cache. While `browser::main_window_dragging()` is true (`WM_ENTERSIZEMOVE` .. `WM_EXITSIZEMOVE`/`WM_CAPTURECHANGED`) the frame paints only: the pending browser queue, clipboard watcher, speed sampling, scheduler tick, overlay heartbeat, main-window and popout position saves, the hook sweep and the theme sweep are deferred to the first frame after the drag, and a hook-set change seen during the drag is remembered in `hook_pending`.
+Consequence: never put an `EnumWindows`/`FindWindowW` call back on the per-frame path. New per-frame work goes on the non-dragging side of that branch. Any change to frame production is measured with `test-window-drag-profile.ps1` (idle / ui / drag frame cost), not eyeballed.
+
+### D-022 The download list pairs its own double-clicks with `GetDoubleClickTime` - locked (2026-11-19)
+egui's `double_clicked()` needs the second press within 300 ms of the first release and times both against frame timestamps, so with 200-400 ms frames a normal Windows double-click (500 ms by default, user-settable) could never register and double-clicking a download silently failed to open its status window. `DmApp::last_row_click` now pairs two clicks on the same row within `native_win::double_click_interval()` (the Control Panel value); egui's own flag still counts when it fires.
+Consequence: do not rely on egui's 300 ms rule for any user-facing double-click action while a frame can exceed it; use `double_click_interval()`.
+
 ## How to add a decision
 
 Append a heading `### D-0NN <title> - locked | open | superseded by D-0MM`, then the

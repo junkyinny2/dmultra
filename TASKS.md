@@ -51,6 +51,36 @@ per-version detail. Add new work under **Todo**, newest P0 first.
       `version (extension): 0.28.2 (follows CARGO_PKG_VERSION)` and `.\checkpoint.ps1 verify`
       exits 0.
 
+### v0.076 - window dragging and click latency (done 2026-11-19)
+
+- [x] Found the real cause of the choppy dragging: `apply_titlebar_theme` ran
+      `EnumWindows` once per frame (~200 ms per sweep on this machine), so every frame
+      cost ~200 ms (~5 fps) and ~400 ms while a progress popout was open. Proof run:
+      `pwsh -NoProfile -File .\test-window-drag-profile.ps1` against the deployed
+      v0.075 - idle avg 207.9 ms (median 200.6), a 675 ms drag produced 5 frames at
+      200.5 ms; with a progress window open 402 ms per frame and 3 drag frames.
+- [x] Cached the sweep (`ChromeCache`: window list + per-window theme signature + last
+      scan, pruned with `IsWindow`) and skipped it, the popout hook sweep and every
+      file / registry / clipboard / state read while a window of ours is inside the
+      modal move loop. Proof run: the same script on v0.076 - drag 40 frames @ 0.2 ms
+      plain and 40 @ 0.6 ms with the progress window open, idle median 0.7 ms, live
+      median 0.8 ms. Decision D-021.
+- [x] Double-clicking a download row opens its status window at the user's own speed
+      (`GetDoubleClickTime`, 500 ms default) instead of egui's 300 ms between-frames
+      rule, which a 200-400 ms frame always rejected (D-022).
+- [x] `test-window-drag-profile.ps1` is tracked and reliable: it finds the caption with
+      `WM_NCHITTEST`, verifies with `WindowFromPoint` + `GetAncestor`, raises our window
+      first and falls back to a posted `WM_NCLBUTTONDOWN`. The earlier "no drag frames"
+      runs were the harness, not the app - Excel's window was over the caption and took
+      the synthesized click (proved with `unused\probe-hwnd.ps1`).
+- [x] Popout close latency in the same run: 288 ms (v0.075) -> 4 ms (v0.076).
+- [x] v0.076 released: `VERSION` 0.076, release build 0 errors / 80 warnings,
+      `dmultra.exe` 16,652,288 B + `dmultra-nmh.exe` 519,680 B deployed to `C:\dmultra`,
+      tagged and zipped with both exes.
+- [x] Suites re-run after the change: `.\build.ps1 check` 0 errors / 80 warnings,
+      `.\build.ps1 test` 29 passed / 0 failed, `node --test` 9 pass / 0 fail,
+      `.\checkpoint.ps1 verify` exit 0.
+
 ### Application work shipped (v0.029 -> v0.074)
 
 - [x] v0.029-0.031 - themed native title bars, centred sub-windows, `PARITY_PLAN.md`,
@@ -89,15 +119,23 @@ per-version detail. Add new work under **Todo**, newest P0 first.
 
 ### P0 - verify the shipped fixes end-to-end
 
-- [ ] Run the six GUI end-to-end scripts now that they are tracked again
-      (`test-minimized-progress.ps1`, `test-minimized-capture.ps1`,
-      `test-main-window-placement.ps1`, `test-minimize-modes.ps1`,
-      `test-single-instance.ps1`, `test-startup-registry.ps1`); they need the binaries
-      deployed in `C:\dmultra` and they are the only end-to-end GUI checks.
-- [ ] Reload the browser extension (chrome://extensions -> Reload) so the v0.075
+- [x] Ran the six GUI end-to-end scripts against the deployed v0.076 (2026-11-19):
+      `test-main-window-placement.ps1` 7/7, `test-startup-registry.ps1` 6/6,
+      `test-single-instance.ps1` 4/4 (after pointing it at `C:\dmultra\dmultra.exe` -
+      it still looked in the repo root), `test-minimize-modes.ps1` 8 pass / 3 fail,
+      `test-minimized-progress.ps1` 3 pass / 3 fail, `test-minimized-capture.ps1`
+      throws at its minimize step. Proof: `pwsh -NoProfile -File .\<script>`.
+- [ ] Fix the three scripts that still assert an *iconic* minimize: since v0.073 (D-007)
+      the app parks the window off-screen whenever a popout is open or a tray mode is
+      set, which is exactly what `test-minimize-modes.ps1` (3 tray checks),
+      `test-minimized-progress.ps1` (3 checks) and `test-minimized-capture.ps1`
+      (its throw) fail on. Proven pre-existing, not a v0.076 regression:
+      `test-minimized-progress.ps1` fails the identical three checks against the saved
+      v0.075 binary (`C:\dmultra\unused\dmultra-baseline-v0075.exe`).
+- [ ] Reload the browser extension (chrome://extensions -> Reload) so the deployed
       `content.js` in `C:\dmultra\browser-extension` is the one actually running, then
       confirm the "Download this video" button disappears within ~6 s of pausing or
-      hiding the video - that is the new 2 s heartbeat plus `STALE_AFTER`.
+      hiding the video - that is the 2 s heartbeat plus `STALE_AFTER`.
 
 ### P1 - remaining IDM parity gaps (from `PARITY_PLAN.md` phases 2-8; that file's
 checkboxes are stale, so this list is the live version)
@@ -128,10 +166,8 @@ checkboxes are stale, so this list is the live version)
 - [ ] Re-sync `PARITY_PLAN.md` checkboxes with what `PROGRESS.md` says shipped.
 - [ ] Give `checkpoint.ps1` a `test` mode that runs `cargo test` + `node --test` and
       prints one pass/fail line, so a milestone check is one command.
-- [ ] Restore the six regression scripts to the repo root (currently in `unused\`):
-      `test-minimized-progress.ps1`, `test-minimized-capture.ps1`,
-      `test-main-window-placement.ps1`, `test-minimize-modes.ps1`,
-      `test-single-instance.ps1`, `test-startup-registry.ps1`.
+- [x] The six regression scripts are back in the repo root and tracked (D-019);
+      `test-window-drag-profile.ps1` was added as the seventh in v0.076.
 
 ## How to verify anything in this file
 
@@ -142,7 +178,8 @@ checkboxes are stale, so this list is the live version)
 | Extension tests | `cd C:\dmultra-base; node --test browser-extension/background.test.js browser-extension/content.test.js` | 9 pass, 0 fail (measured 2026-11-19) |
 | Release build | `cd C:\dmultra-base; .\build.ps1 build --release` | ok (kill any running dmultra first) |
 | Memory files | `cd C:\dmultra-base; .\checkpoint.ps1 verify` | must exit 0 |
-| GUI end-to-end | the six `test-*.ps1` scripts, tracked again in the repo root | not run in this session |
+| GUI end-to-end | `pwsh -NoProfile -File .\test-<name>.ps1` (fresh process each: `Add-Type` collides in a reused shell) | measured 2026-11-19 on v0.076: placement 7/7, startup-registry 6/6, single-instance 4/4, minimize-modes 8/11, minimized-progress 3/6, minimized-capture throws - every failure is the pre-existing iconic-minimize assumption (D-007) |
+| Frame cost by mode | `pwsh -NoProfile -File .\test-window-drag-profile.ps1` (add `-ChildUrl <url>` to drag with a progress window open) | v0.076: drag 0.2 ms plain / 0.6 ms with a popout, idle median 0.7 ms, live median 0.8 ms. v0.075 measured 200.5 / 402.7 / 200.6 / 402.2 ms |
 
 Deploy after a release build: copy `target\release\dmultra.exe` AND
 `target\release\dmultra-nmh.exe` to `C:\dmultra` (Defender exclusion lives there).
