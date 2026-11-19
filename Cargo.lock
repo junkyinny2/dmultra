@@ -1484,7 +1484,7 @@ dependencies = [
 
 [[package]]
 name = "dmultra"
-version = "0.28.0"
+version = "0.28.2"
 dependencies = [
  "anyhow",
  "arboard",

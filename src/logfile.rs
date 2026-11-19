@@ -47,6 +47,56 @@ pub fn set_enabled(on: bool) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Frame profiler (opt-in: only active when `DMULTRA_PROFILE` is set)
+// ---------------------------------------------------------------------------
+//
+// Window dragging is performed by Windows inside a modal message loop that
+// runs on the GUI thread, so the only way to know whether a frame is too
+// expensive to run there is to measure it. Each completed frame writes one
+// `FRAME <mode> <ms>` line to `logs/profile.log`; `<mode>` is `drag` while the
+// move/size loop owns the thread and `idle`/`ui` otherwise, which makes the
+// cost of the drag fast path directly comparable to a normal frame.
+
+static PROFILE_LOCK: Mutex<Option<File>> = Mutex::new(None);
+
+/// True when the frame profiler is enabled (`DMULTRA_PROFILE=1`).
+pub fn profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("DMULTRA_PROFILE").is_some())
+}
+
+/// Record one GUI frame. A single small append per frame is cheap enough not
+/// to distort what it measures, and it survives a killed process (which is how
+/// these tests end the app).
+pub fn profile_frame(mode: &str, ms: f64) {
+    if !profile_enabled() {
+        return;
+    }
+    let mut guard = match PROFILE_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.is_none() {
+        let _ = fs::create_dir_all(dir());
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir().join("profile.log"));
+        *guard = file.ok();
+    }
+    if let Some(f) = guard.as_mut() {
+        let line = format!(
+            "{} FRAME {} {:.2}\n",
+            chrono::Local::now().format("%H:%M:%S%.3f"),
+            mode,
+            ms
+        );
+        let _ = f.write_all(line.as_bytes());
+        let _ = f.flush();
+    }
+}
+
 pub fn log(tag: &str, msg: &str) {
     if !ENABLED.load(Ordering::SeqCst) {
         return;

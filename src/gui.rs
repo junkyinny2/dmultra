@@ -259,6 +259,94 @@ mod native_win {
     }
 }
 
+// ---------------------------------------------------------------------------
+// "Open" actions: run a downloaded file with the program registered for its
+// file type.
+//
+// `explorer.exe <file>` never launches a file - it only opens an Explorer
+// window on the folder that holds it - which is why the status window's "Open"
+// button behaved exactly like "Open Folder". Running a file needs the shell
+// open verb (what a double-click in Explorer does). Declared with plain FFI
+// like the Win32 code above, so no extra crate is pulled in.
+// ---------------------------------------------------------------------------
+
+// `ShellExecuteW` with the "open" verb. Returns an `HINSTANCE` (a value
+// greater than 32) on success, or one of the `SE_ERR_*` codes on failure.
+#[cfg(target_os = "windows")]
+#[link(name = "shell32")]
+extern "system" {
+    fn ShellExecuteW(
+        hwnd: *mut std::ffi::c_void,
+        operation: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show_cmd: std::ffi::c_int,
+    ) -> isize;
+}
+
+/// Why the "Open" action cannot run for `path`, or `None` when the file is on
+/// disk and can be launched. Kept free of any shell call so it is testable and
+/// safe to ask about on every frame.
+fn open_action_blocker(path: &std::path::Path) -> Option<String> {
+    if path.as_os_str().is_empty() {
+        return Some("nothing has been saved for this download yet".to_string());
+    }
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => None,
+        Ok(_) => Some(format!("{} is a folder, not a file", path.display())),
+        Err(_) => Some(format!("{} is not on disk yet", path.display())),
+    }
+}
+
+/// Launch `path` with the program Windows has registered for its extension.
+#[cfg(target_os = "windows")]
+fn shell_open(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    /// SW_SHOWNORMAL: let the associated application open its window normally.
+    const SW_SHOWNORMAL: std::ffi::c_int = 1;
+
+    let file: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let verb: Vec<u16> = std::ffi::OsStr::new("open")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let status = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if status > 32 {
+        return Ok(());
+    }
+    Err(match status {
+        2 => "the file was not found".to_string(),
+        5 => "access to the file was denied".to_string(),
+        31 => "no application is registered for this file type".to_string(),
+        32 => "a shell component could not be loaded".to_string(),
+        other => format!("the shell rejected the file (error {other})"),
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn shell_open(path: &std::path::Path) -> Result<(), String> {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    match std::process::Command::new(opener).arg(path).spawn() {
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!("could not run {opener}: {error}")),
+    }
+}
+
 /// Screen position for a freshly opened main window: centred in the
 /// desktop work area. `inner` is the egui client size in points.
 #[cfg(target_os = "windows")]
@@ -1177,6 +1265,40 @@ impl DmApp {
         }
     }
 
+    /// "Open" action for a download: run the saved file with the program
+    /// registered for its file type (shell open verb). `explorer.exe` only
+    /// *shows* a file, so it is used for folders only - by the separate
+    /// "Open Folder" action. Failures are reported in the status bar and the
+    /// diagnostic log because the popout that raised them has its own window.
+    fn open_download_file(&mut self, id: u64, path: &std::path::Path) {
+        let message = match open_action_blocker(path) {
+            Some(reason) => {
+                crate::logfile::log(
+                    "OPEN",
+                    &format!("download #{id} cannot open {}: {reason}", path.display()),
+                );
+                format!("Could not open: {reason}.")
+            }
+            None => match shell_open(path) {
+                Ok(()) => {
+                    crate::logfile::log(
+                        "OPEN",
+                        &format!("download #{id} launched {}", path.display()),
+                    );
+                    format!("Opened {}.", path.display())
+                }
+                Err(error) => {
+                    crate::logfile::log(
+                        "OPEN",
+                        &format!("download #{id} failed to open {}: {error}", path.display()),
+                    );
+                    format!("Could not open {}: {error}", path.display())
+                }
+            },
+        };
+        self.status_bar = message;
+    }
+
     fn pause_download(&mut self, id: u64) {
         self.manager.stop(id);
         let mut st = self.manager.lock_ui();
@@ -1989,6 +2111,11 @@ impl DmApp {
 // ---------------------------------------------------------------------------
 impl eframe::App for DmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // BASELINE PROFILER PATCH (measurement only, not part of the app):
+        // time the whole frame so the drag fast path can be compared against
+        // this build with identical instrumentation.
+        let frame_start = Instant::now();
+        let dragging = crate::browser::main_window_dragging();
         // A browser-launched instance must not show the main window. eframe
         // flips the window visible right after the first frame, so park it
         // again in that same frame (commands are applied before the event
@@ -3056,7 +3183,7 @@ impl eframe::App for DmApp {
                                 }
                                 ui.separator();
                                 if ui.button("Open File").clicked() {
-                                    let _ = std::process::Command::new("explorer").arg(&d.save_path).spawn();
+                                    self.open_download_file(d.id, &d.save_path);
                                     ui.close_menu();
                                 }
                                 if ui.button("Open Containing Folder").clicked() {
@@ -3292,6 +3419,18 @@ impl eframe::App for DmApp {
                     palette.border.b(),
                 ],
             );
+        }
+
+        // BASELINE PROFILER PATCH: one line per completed frame.
+        if crate::logfile::profile_enabled() {
+            let mode = if dragging {
+                "drag"
+            } else if self.busy_frames.load(Ordering::Relaxed) {
+                "ui"
+            } else {
+                "idle"
+            };
+            crate::logfile::profile_frame(mode, frame_start.elapsed().as_secs_f64() * 1000.0);
         }
     }
 
@@ -4248,6 +4387,9 @@ impl DmApp {
                             });
 
                         ui.add_space(12.0);
+                        // Checked once per frame here so the button can explain
+                        // itself while the file is still arriving.
+                        let open_note = open_action_blocker(&d.save_path);
                         ui.horizontal(|ui| {
                             if d.status == Status::Downloading {
                                 if ui.button(" Pause ").clicked() {
@@ -4258,8 +4400,24 @@ impl DmApp {
                                     self.start_download(id);
                                 }
                             }
-                            if ui.button(" Open ").clicked() {
-                                let _ = std::process::Command::new("explorer").arg(&d.save_path).spawn();
+                            // " Open " must RUN the file. The old
+                            // `explorer <save_path>` call only opened a window
+                            // on the folder holding it, so the button looked
+                            // like a second "Open Folder".
+                            let open_btn = ui.add_enabled(
+                                open_note.is_none(),
+                                egui::Button::new(" Open "),
+                            );
+                            let open_btn = match open_note.as_deref() {
+                                Some(reason) => {
+                                    open_btn.on_disabled_hover_text(format!("Cannot open: {reason}."))
+                                }
+                                None => open_btn.on_hover_text(
+                                    "Open the file with the program registered for its type.",
+                                ),
+                            };
+                            if open_btn.clicked() {
+                                self.open_download_file(id, &d.save_path);
                             }
                             if ui.button(" Open Folder ").clicked() {
                                 if let Some(parent) = d.save_path.parent() {
@@ -5075,4 +5233,52 @@ pub fn launch(manager: Arc<Manager>, start_hidden: bool) -> Result<()> {
     crate::browser::spawn_pending_waker();
     eframe::run_native(&title, options, Box::new(move |_cc| Box::new(app)))
     .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// "Open" action tests. `shell_open` is deliberately not called here: it hands
+// the file to the registered application, which would spawn a real window from
+// a test run.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod open_action_tests {
+    use super::*;
+
+    fn temp_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("dmultra-open-{label}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn a_download_with_no_saved_file_has_nothing_to_open() {
+        assert!(
+            open_action_blocker(std::path::Path::new("")).is_some(),
+            "an empty save path must block the open action"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_on_disk_yet_cannot_be_opened() {
+        let path = temp_path("missing");
+        let _ = std::fs::remove_file(&path);
+        let reason = open_action_blocker(&path).expect("a missing file must block the open action");
+        assert!(reason.contains("not on disk yet"), "unexpected reason: {reason}");
+    }
+
+    #[test]
+    fn a_saved_file_is_openable_while_a_folder_is_not() {
+        let dir = temp_path("dir");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the temp folder");
+        let file = dir.join("download.bin");
+        std::fs::write(&file, b"payload").expect("write the temp file");
+
+        assert!(
+            open_action_blocker(&file).is_none(),
+            "a file on disk must be launchable"
+        );
+        let reason = open_action_blocker(&dir).expect("a folder is not a launchable file");
+        assert!(reason.contains("folder"), "unexpected reason: {reason}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

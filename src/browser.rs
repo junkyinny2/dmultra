@@ -938,6 +938,25 @@ pub fn main_window_parked() -> bool {
     false
 }
 
+/// True while the user is dragging or resizing one of our windows with the
+/// mouse (the main window or any popout).
+///
+/// Windows performs that drag in a modal message loop that runs on **our GUI
+/// thread**, and it dispatches `WM_PAINT` there, so every millisecond a frame
+/// spends on `EnumWindows`, registry reads, state-lock spinning, file polling
+/// or writing `state.json` is a millisecond the loop cannot spend following the
+/// cursor. That is exactly what makes dragging feel choppy, so the GUI drops
+/// all optional work while this reports true (see `DmApp::update`).
+#[cfg(windows)]
+pub fn main_window_dragging() -> bool {
+    wakeup::is_dragging()
+}
+
+#[cfg(not(windows))]
+pub fn main_window_dragging() -> bool {
+    false
+}
+
 /// Install the Win32 hook on the main window (once). Detects the minimize
 /// button so the root is parked instead of becoming iconic.
 #[cfg(windows)]
@@ -1020,6 +1039,13 @@ mod wakeup {
     const WM_SIZE: u32 = 0x0005;
     const WM_ACTIVATE: u32 = 0x0006;
     const WM_SYSCOMMAND: u32 = 0x0112;
+    const WM_CAPTURECHANGED: u32 = 0x0215;
+    /// Sent when a user-initiated move/resize of the window starts and ends.
+    /// The loop Windows runs between them is modal and runs **on the GUI
+    /// thread**, so the GUI has to stay light while it is active - see
+    /// `DRAGGING`.
+    const WM_ENTERSIZEMOVE: u32 = 0x0231;
+    const WM_EXITSIZEMOVE: u32 = 0x0232;
     const SIZE_RESTORED: usize = 0;
     const SIZE_MAXIMIZED: usize = 2;
     /// `WPF_RESTORETOMAXIMIZED`: the window was maximized before minimizing.
@@ -1048,6 +1074,9 @@ mod wakeup {
     static POPOUT_OPEN: AtomicBool = AtomicBool::new(false);
     /// Original window procedure of the main window (0 until installed).
     static MAIN_PREV: AtomicIsize = AtomicIsize::new(0);
+    /// The user is dragging or resizing the main window right now (set by the
+    /// window procedure between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`).
+    static DRAGGING: AtomicBool = AtomicBool::new(false);
 
     #[link(name = "user32")]
     unsafe extern "system" {
@@ -1308,6 +1337,10 @@ mod wakeup {
         PARKED.load(Ordering::Relaxed)
     }
 
+    pub(super) fn is_dragging() -> bool {
+        DRAGGING.load(Ordering::Relaxed)
+    }
+
     /// Restore+park a genuinely iconic main window (a popout was opened
     /// while it was minimized to the taskbar).
     pub(super) fn wake_for_popouts() {
@@ -1391,6 +1424,13 @@ mod wakeup {
             // Taskbar button click, Alt+Tab, tray restore.
             unpark();
             return 0;
+        } else if msg == WM_ENTERSIZEMOVE {
+            DRAGGING.store(true, Ordering::Relaxed);
+        } else if msg == WM_EXITSIZEMOVE || msg == WM_CAPTURECHANGED {
+            // `WM_CAPTURECHANGED` also arrives whenever the move loop lets go
+            // of the mouse (including an interrupted drag), so the flag can
+            // never stay stuck and silence the GUI's polling forever.
+            DRAGGING.store(false, Ordering::Relaxed);
         }
 
         unsafe { CallWindowProcW(prev, hwnd, msg, wparam, lparam) }
@@ -1539,6 +1579,12 @@ const WS_EX_TOOLWINDOW: i32 = 0x00000080;
             unsafe {
                 ShowWindow(hwnd, SW_HIDE);
             }
+        } else if msg == WM_ENTERSIZEMOVE {
+            // A popout is painted by the root frame, so dragging one puts the
+            // same load on the GUI thread as dragging the main window.
+            DRAGGING.store(true, Ordering::Relaxed);
+        } else if msg == WM_EXITSIZEMOVE || msg == WM_CAPTURECHANGED {
+            DRAGGING.store(false, Ordering::Relaxed);
         }
 
         let result = unsafe { CallWindowProcW(previous, hwnd, msg, wparam, lparam) };
