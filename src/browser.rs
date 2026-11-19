@@ -16,7 +16,10 @@ use std::path::PathBuf;
 pub const NM_NAME: &str = "com.dmultra.nm";
 /// Fixed extension id (derived from EXT_KEY, so it never changes).
 pub const EXT_ID: &str = "pcnmkbbloiajlkefepnadpjkambhejjk";
-const EXT_VERSION: &str = "0.28.2";
+/// Extension/manifest version. Always the package version, so an installed
+/// extension can never report a version that differs from the app that wrote
+/// its manifest (DECISIONS.md D-014; `browser::tests` asserts this).
+const EXT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Public key pinning the extension id (manifest "key").
 pub const EXT_KEY: &str = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr1BeFI9PhsGMTpTft1kMyZjNzrKYPNATen+DoR7rb3UGJ8HTjGg89w7hzVdWcWXyOaYlmh1xe7cZ7em7X8Uj+rEZoHHt50ElB/hy05r6D8qt40MGdrkWIL800eVkh8d93UeXKFyDqH2D+i7cYDZGItiCz8g7g0dXo04hcly1QW8TocPeF0LiRSkVKYsXmqs0F81+T+TmYyds0Cnn8EJVN9LLb3kjpMaklhd4N9tV9Q79j956/c+ZhxviXwfa6pxTWrB2Yce13OHwhnbREhMoXOXF32246asMMlv/SF42H8wpZ3bd6T6n4C02iulpucpvx4usoLX67f93gWcRRNEwVQIDAQAB";
 

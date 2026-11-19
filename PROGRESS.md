@@ -259,3 +259,28 @@
 - Built with `.\build.ps1 build --release`, both `dmultra.exe` and
   `dmultra-nmh.exe` deployed to `C:\dmultra\`, source + binaries zipped as
   `unused\releases\dmultra-v0.074-<date>.zip`.
+
+## v0.075 (released 2026-11-19)
+- The extension no longer throws when it is injected before
+  `document.documentElement` exists. It runs at `document_start` in every frame,
+  and the video MutationObserver used to call `observe()` on a null root in that
+  window; it is now attached only once the root is there, deferred to
+  `DOMContentLoaded` when it is not.
+- A detected stream with no declared quality is labelled with the resolution the
+  player is actually playing - `MP4 - 1920x1080` instead of a bare `MP4`.
+  Qualities the stream declares itself (the HLS variant list) still win.
+- The overlay heartbeat the desktop side always expected is now real. While the
+  button is on screen the extension re-sends the update every 2 s, independent of
+  the 3 s scan throttle; `overlay.rs` hides the button 6 s after the last beat
+  (`STALE_AFTER`), so a throttled beat was never enough.
+- `EXT_VERSION` is taken from `CARGO_PKG_VERSION`, so a generated extension
+  manifest can never report a version other than the app that wrote it. This
+  closes the long-standing test failure (DECISIONS.md D-014).
+- `unused/` and `reference/` are git-ignored and the six GUI end-to-end
+  `test-*.ps1` scripts are back in the repo root (D-019). `master` could not be
+  checked out normally because the branch was still locked to the stale
+  `C:/dmultra/unused` worktree; `git checkout --ignore-other-worktrees master`
+  releases that lock.
+- Measured: extension 9/9, Rust 29/29, `build.ps1 check` 0 errors, release build
+  0 errors / 80 warnings (baseline), `dmultra.exe` 15,606,784 B and
+  `dmultra-nmh.exe` 506,880 B rebuilt 2026-11-19 and copied to `C:\dmultra`.

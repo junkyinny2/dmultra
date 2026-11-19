@@ -20,6 +20,25 @@ per-version detail. Add new work under **Todo**, newest P0 first.
 - [x] Repaired the git worktree pointer that the folder cleanup broke (`PROJECT_STATUS.md` 7.9).
 - [ ] Proof not yet run by you: `cd C:\dmultra-base; .\checkpoint.ps1 verify` must exit 0.
 
+### P0 - tree green, v0.074 and v0.075 landed - done 2026-11-19
+
+- [x] Version drift killed and made permanent: `EXT_VERSION = env!("CARGO_PKG_VERSION")`
+      in `src/browser.rs`; `Cargo.toml` 0.28.2 = generated and on-disk extension manifest
+      0.28.2. Proof run: `.\build.ps1 test` -> 29 passed; 0 failed (D-014 closed).
+- [x] The three failing extension tests fixed in `browser-extension/content.js`: observer
+      attached only once `documentElement` exists, stream labels carry the playing
+      resolution, 2 s overlay heartbeat added. Proof run: `node --test
+      browser-extension/background.test.js browser-extension/content.test.js` -> 9 pass, 0 fail.
+- [x] v0.074 landed in git: `git checkout --ignore-other-worktrees master` (the branch was
+      locked to the stale `C:/dmultra/unused` worktree - plain checkout refused), code
+      commit `1fa7935`, memory/docs commit `385cc3a`, tag `v0.074`,
+      `C:\dmultra\unused\releases\dmultra-v0.074-20261119.zip` (105 entries, both exes).
+- [x] v0.075 released: extension fixes + `EXT_VERSION` change + `VERSION` 0.075, release
+      build 0 errors / 80 warnings, both exes copied to `C:\dmultra` (new extension code
+      verified inside the deployed exe), tag + zip.
+- [x] `unused/` and `reference/` git-ignored; the six GUI end-to-end `test-*.ps1` scripts
+      restored to the repo root and tracked again (D-019).
+
 ### Application work shipped (v0.029 -> v0.074)
 
 - [x] v0.029-0.031 - themed native title bars, centred sub-windows, `PARITY_PLAN.md`,
@@ -52,31 +71,21 @@ per-version detail. Add new work under **Todo**, newest P0 first.
 
 ## Doing
 
-- Nothing in flight. The memory system is the only new work and it is complete;
-  verify it with `.\checkpoint.ps1 verify`.
+- Nothing in flight.
 
 ## Todo
 
-### P0 - make the tree green and land v0.074
+### P0 - publish what is already committed
 
-- [ ] Kill the version drift so `cargo test` is green (decision needed, `DECISIONS.md` D-014):
-      either `EXT_VERSION = env!("CARGO_PKG_VERSION")` in `src/browser.rs:19`, or set
-      `Cargo.toml` version to `0.28.2`. Proof: `.\build.ps1 test` -> "29 passed; 0 failed".
-- [ ] Fix the three failing extension tests in `browser-extension/content.test.js`:
-      "waits for documentElement before observing early-injected frames",
-      "labels the detected stream with the playing video resolution" (got `MP4`,
-      expected `MP4 - 1920x1080`), "refreshes the native overlay before its stale
-      heartbeat timeout". Proof: `node --test browser-extension/content.test.js`.
-- [ ] Land v0.074 in git: `git checkout master` (HEAD is detached at `dff3be5`, which
-      is already `master`), commit the v0.074 change set, tag `v0.074`, push.
-      Proof: `git --no-pager tag --sort=-creatordate` shows `v0.074`.
-- [ ] Push what was never published: `origin/master` is still at `9ed1e8a` (v0.040) and
-      the remote has no tag past `v0.040`, while this repo holds 53 tags up to `v0.073`.
-      Proof: `git --no-pager ls-remote --tags origin` lists a `v0.07x`.
-      `dmultra-v0.074-<yyyymmdd>.zip` (older ones live in `C:\dmultra\unused\releases`).
-- [ ] Decide what git should do with the untracked `unused/` and `reference/` folders
-      and the six deleted `test-*.ps1` scripts (ignore them, or move the scripts back
-      into the repo - they are the only GUI end-to-end tests).
+- [ ] Push `master` and the tags: `cd C:\dmultra-base; git push origin master` then
+      `git push origin --tags`. `origin/master` is still at `9ed1e8a` (v0.040) and the
+      remote has no tag past `v0.040`, so nothing from v0.041-v0.075 is published.
+      Proof: `git --no-pager ls-remote --tags origin` lists `v0.075`.
+- [ ] Run the six GUI end-to-end scripts now that they are tracked again
+      (`test-minimized-progress.ps1`, `test-minimized-capture.ps1`,
+      `test-main-window-placement.ps1`, `test-minimize-modes.ps1`,
+      `test-single-instance.ps1`, `test-startup-registry.ps1`); they need the binaries
+      deployed in `C:\dmultra` and they are the only end-to-end GUI checks.
 
 ### P1 - remaining IDM parity gaps (from `PARITY_PLAN.md` phases 2-8; that file's
 checkboxes are stale, so this list is the live version)
@@ -117,11 +126,11 @@ checkboxes are stale, so this list is the live version)
 | Suite | Command | Today |
 |---|---|---|
 | Compile | `cd C:\dmultra-base; .\build.ps1 check` | 0 errors, 80 warnings |
-| Rust tests | `cd C:\dmultra-base; .\build.ps1 test` | 28 passed, 1 failed |
-| Extension tests | `cd C:\dmultra-base; node --test browser-extension/background.test.js browser-extension/content.test.js` | 9 tests, 6 passed, 3 failed |
+| Rust tests | `cd C:\dmultra-base; .\build.ps1 test` | 29 passed, 0 failed (measured 2026-11-19) |
+| Extension tests | `cd C:\dmultra-base; node --test browser-extension/background.test.js browser-extension/content.test.js` | 9 pass, 0 fail (measured 2026-11-19) |
 | Release build | `cd C:\dmultra-base; .\build.ps1 build --release` | ok (kill any running dmultra first) |
 | Memory files | `cd C:\dmultra-base; .\checkpoint.ps1 verify` | must exit 0 |
-| GUI end-to-end | the six `test-*.ps1` scripts in `unused\` | not run since the cleanup |
+| GUI end-to-end | the six `test-*.ps1` scripts, tracked again in the repo root | not run in this session |
 
 Deploy after a release build: copy `target\release\dmultra.exe` AND
 `target\release\dmultra-nmh.exe` to `C:\dmultra` (Defender exclusion lives there).

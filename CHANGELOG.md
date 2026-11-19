@@ -7,19 +7,14 @@ in version X". Newest first. Status column: `released` = tagged and published,
 
 ## Unreleased
 
-### v0.074 - status window "Open" really opens the file (built + deployed, NOT tagged)
-- Open buttons use the shell open verb (`ShellExecuteW "open"`) instead of
-  `explorer.exe <path>`, shared through `DmApp::open_download_file`; Open is disabled
-  with a tooltip until the file exists; outcome goes to the status bar and the log.
-- `src/state.rs` no longer writes to stderr (a GUI-subsystem exe has no console, so
-  `println!` panicked and killed the process); a panic hook now writes `panic.log`.
-- New tests: `gui::open_action_tests` (3). Built 2026-11-18 and copied to `C:\dmultra`.
-- Outstanding: commit + tag `v0.074` + release zip (AGENTS.md requires all three).
+- Nothing pending. The newest release is v0.075.
 
 ## Released history
 
 | Version | Status | Headline |
 |---|---|---|
+| v0.075 | tagged + zip | Extension: attach the video observer only once `documentElement` exists, label streams with the playing resolution, send the 2 s overlay heartbeat `overlay.rs` expects; `EXT_VERSION` now comes from `CARGO_PKG_VERSION` (D-014 closed). |
+| v0.074 | tagged + zip `385cc3a` | Status window "Open" uses the shell open verb; no stderr writes in a GUI exe; panic hook writes `panic.log`. |
 | v0.073 | tagged `dff3be5` | Park the main window off-screen so popouts stay interactive. |
 | v0.072 | tagged | Child windows keep working while the main window is out of the way. |
 | v0.067 | built | Finish the self-clocking busy-waker (`spawn_busy_waker` takes `frame_seq`); popout close latency 401 ms. |

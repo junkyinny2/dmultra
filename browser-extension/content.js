@@ -104,12 +104,35 @@ function fmtFromUrl(url) {
   return m ? m[1].toLowerCase() : '';
 }
 
+// The intrinsic resolution of the element actually playing this URL is the
+// quality label for a single-representation stream - IDM shows
+// "MP4 - 1920x1080" rather than a bare "MP4". Explicit qualities (the HLS
+// variant list) always win over this.
+function playingResolution(url) {
+  let best = '';
+  let bestArea = 0;
+  try {
+    document.querySelectorAll('video').forEach((el) => {
+      const src = el.currentSrc || el.src || (el.getAttribute ? el.getAttribute('src') : '') || '';
+      if (src !== url) return;
+      const w = el.videoWidth || 0;
+      const h = el.videoHeight || 0;
+      if (w > 0 && h > 0 && w * h > bestArea) {
+        bestArea = w * h;
+        best = `${w}x${h}`;
+      }
+    });
+  } catch (e) {}
+  return best;
+}
+
 function addVideo(url, format, quality) {
   if (!url || !/^https?:/i.test(url)) return;
   if (detectedVideos.find((v) => v.url === url)) return;
   const fmt = format || fmtFromUrl(url) || 'video';
-  const label = quality ? `${fmt.toUpperCase()} - ${quality}` : `${fmt.toUpperCase()}`;
-  detectedVideos.push({ url, format: fmt, quality: quality || '', label });
+  const q = quality || playingResolution(url);
+  const label = q ? `${fmt.toUpperCase()} - ${q}` : `${fmt.toUpperCase()}`;
+  detectedVideos.push({ url, format: fmt, quality: q, label });
   // Don't send update immediately; let the throttle batch it.
   scheduleOverlayUpdate();
 }
@@ -297,15 +320,26 @@ try {
 
 // Observers + periodic rescan — heavily throttled to avoid main-thread jank.
 // MutationObserver: debounce to max once per 3s.
+// The script runs at document_start in every frame, and a frame can be
+// injected before document.documentElement exists; observing a null root
+// throws, so the observer is attached only once the root is there.
 let mutationDebounce = 0;
-new MutationObserver(() => {
+const videoObserver = new MutationObserver(() => {
   if (mutationDebounce) return;
   mutationDebounce = 1;
   setTimeout(() => {
     mutationDebounce = 0;
     scanForVideo();
   }, 3000);
-}).observe(document.documentElement, { childList: true, subtree: true });
+});
+function attachVideoObserver() {
+  if (!document.documentElement) return false;
+  videoObserver.observe(document.documentElement, { childList: true, subtree: true });
+  return true;
+}
+if (!attachVideoObserver()) {
+  document.addEventListener('DOMContentLoaded', attachVideoObserver);
+}
 
 // Scroll/resize: only update position if we already have videos (cheap).
 let scrollResizeScheduled = false;
@@ -346,3 +380,10 @@ if (document.readyState === 'loading') {
 }
 // Periodic full rescan — very slow (30s) just to catch late-loading players.
 setInterval(scanForVideo, 30000);
+// Heartbeat: the desktop button hides itself when updates stop arriving
+// (overlay.rs STALE_AFTER is 6 s), so while a button is on screen its
+// position and quality list are re-sent on a fixed 2 s beat. This bypasses
+// the scan throttle on purpose — a throttled heartbeat is not a heartbeat.
+setInterval(() => {
+  if (overlayShown) sendOverlayUpdateNow();
+}, 2000);

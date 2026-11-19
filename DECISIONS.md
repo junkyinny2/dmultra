@@ -114,17 +114,19 @@ executables on this machine expensive) and do not attempt a real MMS stack.
 
 ## Release, versioning, environment
 
-### D-014 Three version strings must agree - OPEN, currently violated
-`VERSION` (0.074) is what the title bar and About show (`src/gui.rs:32`);
-`Cargo.toml` (0.28.0) becomes the exe FileVersion/ProductVersion (`build.rs`) and is
-what the manifest test in `browser.rs` compares against; `EXT_VERSION`
-(`src/browser.rs:19`, 0.28.2) is written into the generated Chromium/Firefox manifests.
-Today all three disagree and `cargo test` fails because of it.
-Recommended resolution: drive `EXT_VERSION` from `env!("CARGO_PKG_VERSION")` so the
-extension can never drift, then decide deliberately whether `VERSION` (UI title plus
-git tags) should also come from `Cargo.toml` or stay an independent release counter.
-Consequence until fixed: every release ships an extension whose manifest version does
-not match the app, and a red test suite that hides real regressions.
+### D-014 Extension version follows the package version; `VERSION` is the release counter - locked (resolved 2026-11-19)
+`Cargo.toml` (`0.28.2`) is the exe FileVersion/ProductVersion (`build.rs`) and is now
+also the single source of `EXT_VERSION` (`src/browser.rs`, `env!("CARGO_PKG_VERSION")`),
+which is what gets written into the generated Chromium/Firefox manifests. An installed
+extension therefore can never report a version different from the app that installed
+it, and `browser::tests::generated_extension_manifests_use_the_application_version`
+can no longer drift out of sync on its own.
+`VERSION` (`0.075`) stays an independent release counter: it is what the title bar and
+About show (`src/gui.rs`) and what the `vX.YYY` tags name. Historically `Cargo.toml`
+sat at `0.28.0` across releases v0.031-v0.073 while `VERSION` advanced every release,
+which is why the two numbers do not track each other.
+Consequence: bump `Cargo.toml` to change the extension/exe version, bump `VERSION` and
+tag `vX.YYY` to name a release. Never hardcode `EXT_VERSION` again.
 
 ### D-015 Release procedure - locked
 Bump `VERSION` -> commit -> tag `vX.YYY` -> zip source + both exes with the version in
@@ -159,6 +161,29 @@ need ALL APPLICATION PACKAGES grants), and `HKCU\Software\Policies` is ACL-locke
 policy edits from the app fail.
 Consequence: do not "clean up" ACL grants, do not move the binaries out of
 `C:\dmultra`, and do not plan on setting machine policy from the app.
+
+### D-019 `unused/` and `reference/` are ignored, not deleted - locked (2026-11-19)
+`unused\` holds the items moved out of the clean tree (catalogued in
+`UNUSED_FILES_LOG.md`) plus scratch logs, and `reference\` holds the
+reverse-engineering input (70 files / 1.2 MB, mostly the ghidra output and extracted
+strings that `.gitignore` already excluded). Both folders are now ignored. The six GUI
+end-to-end `test-*.ps1` scripts were moved back from `unused\` into the repo root,
+because they are the only end-to-end GUI tests and a release snapshot must contain
+them (the historical release zips all do).
+Consequence: an untracked folder here is an archive, not junk - never delete it. Keep
+the GUI test scripts tracked, and keep the release zips outside the tree.
+
+### D-020 The extension owns the overlay heartbeat and must tolerate early injection - locked (2026-11-19)
+`content.js` runs at `document_start` in every frame, so it can load before
+`document.documentElement` exists; the video `MutationObserver` is now attached only
+once that root is there (deferred to `DOMContentLoaded`) instead of observing a null
+root. While the desktop button is visible the extension re-sends the overlay update on
+a fixed 2 s beat, which is the cadence `overlay.rs` (`STALE_AFTER` 6 s) has always
+documented. A stream with no declared quality is labelled with the playing element's
+intrinsic resolution (`MP4 - 1920x1080`); declared HLS variant qualities always win.
+Consequence: the button only disappears on time if the extension keeps sending - do not
+fold the 2 s heartbeat into the 3 s scan throttle, and never observe a root that may be
+null.
 
 ## How to add a decision
 
