@@ -171,8 +171,9 @@ function Invoke-Status {
         Write-Host ("  tasks              : {0} done, {1} open" -f $done, $open)
     }
 
-    Write-Host '  prove the tree     : build.ps1 check / build.ps1 test /'
-    Write-Host '                         node --test browser-extension/background.test.js browser-extension/content.test.js'
+    Write-Host '  prove the tree     : checkpoint.ps1 test -StopApp  (one line per suite)'
+    Write-Host '                       or by hand: build.ps1 check / build.ps1 test /'
+    Write-Host '                       node --test browser-extension/background.test.js browser-extension/content.test.js'
     Write-Host '  then read          : AGENTS.md, PROJECT_STATUS.md, TASKS.md, DECISIONS.md'
 }
 
