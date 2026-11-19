@@ -101,6 +101,10 @@ Additional invariants:
   `.\build.ps1 build --release`; deploy by copying
   `target\release\dmultra.exe` AND `target\release\dmultra-nmh.exe` to
   `C:\dmultra\`.
+- One command proves the whole tree: `.\checkpoint.ps1 test -StopApp` (cargo test +
+  the extension's `node --test` + `test-window-drag-profile.ps1`, one pass/fail line
+  per suite, exit code = number of red suites, dragging median asserted per D-021).
+  A red suite writes its full output to `unused\checkpoint-<suite>.txt`.
 - Version control: this repository is under git (the user requested it).
   `VERSION` holds the current version (`0.001`), and each released
   version is tagged `vX.YYY` (first tag: `v0.001`). Binaries and build

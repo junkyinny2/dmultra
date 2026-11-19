@@ -7,7 +7,17 @@ in version X". Newest first. Status column: `released` = tagged and published,
 
 ## Unreleased
 
-- Nothing pending. The newest release is v0.076.
+- Test harness and tooling only - no app code, so no `VERSION` bump and no zip due (D-015).
+  The three GUI end-to-end scripts now assert the D-007 park contract instead of an iconic
+  minimize and all pass against the deployed v0.076: `test-minimize-modes.ps1` 13/13 (was
+  8/11), `test-minimized-progress.ps1` 6/6 (was 4/6), `test-minimized-capture.ps1` exits 0
+  (it used to throw at its minimize step). `checkpoint.ps1` gained a `test` mode that runs
+  cargo test + the extension's `node --test` + `test-window-drag-profile.ps1`, prints one
+  pass/fail line per suite, exits with the number of red suites and asserts the dragging
+  frame median against `-DragMaxMs` (1.0 ms default) so the v0.076 fast path cannot regress
+  silently. Tested: `.\checkpoint.ps1 test -StopApp` -> exit 0 (29 rust tests, 9 extension
+  tests, 40 drag frames at 0.1 ms median) and `.\checkpoint.ps1 verify` -> exit 0. Nothing
+  is owed from v0.076 in code; only the manual browser extension reload remains.
 
 ## Released history
 

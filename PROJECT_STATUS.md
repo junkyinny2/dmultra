@@ -12,10 +12,12 @@ Resume order for a new conversation (do not ask the user to re-explain the proje
    history (it is the source of truth for what shipped; `PARITY_PLAN.md` checkboxes
    are stale for phases 2-8).
 
-Last checkpoint: 2026-11-19 15:41 - drag-profile harness hardened (SwitchToThisWindow escalation + throws when the drag never engaged); re-measured on the shipped v0.076: 40 drag frames at 0.2 ms, idle median 0.3 ms [git 6162660 master, dirty=4, VERSION 0.076]
+Last checkpoint: 2026-11-19 17:41 - the three stale GUI scripts now assert the D-007 park contract (13/13, 6/6, exit 0) and checkpoint.ps1 gained a test mode (cargo + node + drag green in 14 s, drag median 0.1 ms) [git 98b35cd master, dirty=8, VERSION 0.076]
 Refresh: `.\checkpoint.ps1 save -Note "what just changed"`
 Briefing: `.\checkpoint.ps1 status`
 Self-check: `.\checkpoint.ps1 verify` (fails if a memory file is missing, thin or stale)
+Suites: `.\checkpoint.ps1 test -StopApp` (cargo + extension + drag harness, one line each,
+        exit code = red suites; `-SkipGui` drops the cursor-dependent harness)
 
 ## 1. What we are building
 
@@ -48,7 +50,8 @@ no plugins, no BitTorrent, no eD2K, no accounts, no API service. Two binaries:
 | `.\build.ps1 test` | **29 passed, 0 failed** - re-run 2026-11-19 after the v0.076 change. |
 | `node --test browser-extension/background.test.js browser-extension/content.test.js` | **9 pass, 0 fail**. |
 | Frame cost by mode (`test-window-drag-profile.ps1`, v0.076) | idle median 0.7 ms, live median 0.8 ms, dragging 0.2 ms plain and 0.6 ms with a progress window open. The same script on v0.075 measured 200.6 ms idle, 402.2 ms live and 200-403 ms while dragging (3-5 frames per drag instead of 40). |
-| GUI end-to-end scripts (v0.076) | placement 7/7, startup-registry 6/6, single-instance 4/4 (after fixing its exe path), minimize-modes 8/11, minimized-progress 3/6, minimized-capture throws at its minimize step. The minimize failures are pre-existing - proven by running minimized-progress against the saved v0.075 exe - because those scripts still assert an iconic minimize, which D-007 parking replaced. |
+| GUI end-to-end scripts (v0.076) | placement 7/7, startup-registry 6/6, single-instance 4/4, minimize-modes 13/13, minimized-progress 6/6, minimized-capture exit 0 - all re-measured 2026-11-19 after the three scripts were rewritten to assert the D-007 park contract (out of sight + taskbar button) instead of `IsIconic`. Each must run in a fresh shell (`Add-Type` collides in a reused one). |
+| `.\checkpoint.ps1 test -StopApp` (v0.076) | exit 0 in 14 s: `rust unit tests 29 passed, 0 failed`, `extension tests 9 of 9 pass, 0 fail`, `gui frame cost 34 idle frames median 0.6 ms, 40 drag frames median 0.1 ms`. `-SkipGui` runs the same two non-desktop suites in 3 s. Measured 2026-11-19. |
 | Release binaries | `target\release\dmultra.exe` 16,652,288 B and `dmultra-nmh.exe` 519,680 B, built 2026-11-19 14:41 and copied to `C:\dmultra`. File/ProductVersion 0.28.2.0. The previous binary is kept at `C:\dmultra\unused\dmultra-baseline-v0075.exe` for A/B measurement. |
 | Version strings | `Cargo.toml` 0.28.2 = `EXT_VERSION` (`env!("CARGO_PKG_VERSION")`) = generated and on-disk extension manifest 0.28.2. `VERSION` 0.076 is the release counter (title bar, About, tags) and is deliberately independent of the package version - see D-014. |
 | Git | On `master`, reached with `git checkout --ignore-other-worktrees master`: the branch was locked to the stale `C:/dmultra/unused` worktree, which is why HEAD was detached. Tags `v0.074` (`385cc3a`), `v0.075`, `v0.076`. `unused/` and `reference/` are ignored (D-019); the seven `test-*.ps1` scripts are tracked. Remote `https://github.com/junkyinny2/dmultra.git`; other branch `tauri-gui` (abandoned non-egui GUI). |
@@ -151,28 +154,29 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
 | 7.16 | Dragging the window was choppy, clicks felt ignored, the app ran at ~5 fps | `apply_titlebar_theme` called `EnumWindows` once per frame; one sweep of ~340 top-level windows costs ~200 ms inside win32k on this machine, and Windows runs a title-bar drag in a modal loop on the GUI thread, so the drag could only advance one frame per step (~400 ms/step with a popout open) | Cache the sweep and skip it - plus the hook sweep and every file / registry / clipboard / state read - while `main_window_dragging()` is true (`gui.rs::native_win::ChromeCache`, v0.076, D-021). Measured 402 ms -> 0.6 ms per frame |
 | 7.17 | `test-window-drag-profile.ps1` said "no drag frames" and the window never moved | Not an app bug: `GetWindowRect` includes the invisible resize border, and Excel's window was sitting over the caption, so the synthesized click landed in Excel | The harness raises our window first, finds the caption with `WM_NCHITTEST`, verifies with `WindowFromPoint` + `GetAncestor`, escalates to `SwitchToThisWindow` when `SetForegroundWindow` is refused, and throws if the window never moved |
 | 7.18 | `test-single-instance.ps1` could not start: "cannot find C:\dmultra-base\dmultra.exe" | The script still pointed at the repo root, a pre-cleanup layout; the repo tree holds no binaries | Point it at the deployed `C:\dmultra\dmultra.exe` (v0.076) - 4/4 PASS after the change |
+| 7.19 | `test-minimize-modes.ps1` failed 3 checks, `test-minimized-progress.ps1` 2, `test-minimized-capture.ps1` threw at its minimize step | The scripts asserted `IsIconic`. Since v0.073 (D-007) the tray modes park the window at (-32000,-32000) while keeping it `WS_VISIBLE` (and "tray only" adds `WS_EX_TOOLWINDOW`), so it is never iconic - the app was right, the assertion was stale | Assert "out of sight" (iconic OR hidden OR off-screen) plus the presence of the taskbar button: `IsOutOfSight` / `HasTaskbarButton` in each script. All three now exit 0 |
+| 7.20 | After the fix, the "taskbar" check failed on one run and passed on the next with the same binary | Not a flake: `gui.rs:2348` parks the window in *any* mode while a popout is open, and a leftover download in `state.json` had its 'Download status' window open at startup on the first run | The script now counts the app's own titled top-level windows before minimizing and expects a real iconic minimize only when that count is 0 (`unused\probe-taskbar.ps1` proved it) |
 
 ## 8. Exact next steps
 
 1. Reload the browser extension so the deployed `content.js` in
    `C:\dmultra\browser-extension` is the running one, then confirm the "Download this
    video" button disappears within ~6 s of pausing or hiding the video (the 2 s heartbeat
-   plus `STALE_AFTER`).
-2. Fix the three end-to-end scripts that still assert an *iconic* minimize:
-   `test-minimize-modes.ps1` (3 tray checks), `test-minimized-progress.ps1` (3 checks)
-   and `test-minimized-capture.ps1` (it throws at its minimize step). Since v0.073 (D-007)
-   the app parks the window off-screen whenever a popout is open or a tray mode is set, so
-   those are a stale assumption rather than a regression - `test-minimized-progress.ps1`
-   fails the identical three checks against the saved v0.075 binary.
-3. Give `checkpoint.ps1` a `test` mode that runs `cargo test`, `node --test` and
-   `test-window-drag-profile.ps1` and prints one pass/fail line per suite, so a milestone
-   check is a single command.
-4. Only then pick the next feature from `PARITY_PLAN.md` (the live list is `TASKS.md` P1).
-5. Measure, never eyeball, any change to frame production:
+   plus `STALE_AFTER`). The deployed file is already byte-identical to the repo copy
+   (both SHA256 `5E3827C2...FFFC36`, verified 2026-11-19); only the browser's own
+   chrome://extensions -> Reload is outstanding, and that needs a human at the browser.
+2. Only then pick the next feature from `PARITY_PLAN.md` (the live list is `TASKS.md` P1).
+3. Measure, never eyeball, any change to frame production:
    `pwsh -NoProfile -File .\test-window-drag-profile.ps1` (add `-ChildUrl <url>` to drag
-   with a progress window open). v0.076 must stay at <= 1 ms per dragging frame (D-021).
-6. At every milestone run `.\checkpoint.ps1 save -Note "..."`, keep `TASKS.md` and
+   with a progress window open), or `.\checkpoint.ps1 test -StopApp` for the whole tree at
+   once. v0.076 must stay at <= 1 ms per dragging frame (D-021) - it measured 0.1 ms on
+   2026-11-19.
+4. At every milestone run `.\checkpoint.ps1 save -Note "..."`, keep `TASKS.md` and
    `CHANGELOG.md` current, and `.\checkpoint.ps1 verify` must stay at exit 0.
+
+Done since the previous checkpoint: items 2 and 3 of the old list - the three
+end-to-end scripts now assert the D-007 park contract (all exit 0) and
+`checkpoint.ps1` has its `test` mode. Proof commands are in `TASKS.md`.
 
 ## 9. Standing rules that override convenience
 
@@ -188,6 +192,7 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
   work is mid-flight.
 
 <!-- CHECKPOINT:BEGIN -->
+- 2026-11-19 17:41 | git 98b35cd master dirty=8 | the three stale GUI scripts now assert the D-007 park contract (13/13, 6/6, exit 0) and checkpoint.ps1 gained a test mode (cargo + node + drag green in 14 s, drag median 0.1 ms)
 - 2026-11-19 15:41 | git 6162660 master dirty=4 | drag-profile harness hardened (SwitchToThisWindow escalation + throws when the drag never engaged); re-measured on the shipped v0.076: 40 drag frames at 0.2 ms, idle median 0.3 ms
 - 2026-11-19 15:26 | git 74ad8ad master dirty=5 | v0.076 released: cached window sweep + drag fast path (402 ms -> 0.6 ms/frame), double-click via GetDoubleClickTime, drag-profile harness proven
 - 2026-11-19 10:44 | git 0a3764a master dirty=2 | checkpoint.ps1 now resolves the derived extension version

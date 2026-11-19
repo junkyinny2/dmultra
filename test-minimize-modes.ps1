@@ -4,12 +4,25 @@
 # taskbar button and shows a tray icon; "tray only" hides the window (and its
 # taskbar button) so only the notification-area icon remains.
 #
+# Since v0.073 (DECISIONS.md D-007) "hidden" is NOT an iconic minimize: the
+# main window is parked off-screen at (-32000,-32000) while staying WS_VISIBLE,
+# because eframe paints the download popouts from the root frame and stops
+# scheduling frames for an iconic root. "tray only" additionally sets
+# WS_EX_TOOLWINDOW so the taskbar button goes away; "taskbar + tray" keeps it.
+# Only plain "taskbar" mode (with no popout open) is allowed to become iconic.
+# So these checks assert "out of sight" (iconic OR hidden OR off-screen) plus
+# the presence of the taskbar button, never IsIconic alone - that stale
+# assumption is what made three of them fail against v0.073..v0.076.
+#
 # Usage: .\test-minimize-modes.ps1
+#        Run it in a fresh shell (pwsh -NoProfile -File .\test-minimize-modes.ps1);
+#        a reused shell already has the MinMode type loaded and Add-Type collides.
 
 $ErrorActionPreference = 'Stop'
 
 Add-Type @"
 using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Runtime.InteropServices;
 
@@ -21,6 +34,12 @@ public class MinMode {
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr h, int idx);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+    const int GWL_EXSTYLE = -20;
+    const int WS_EX_TOOLWINDOW = 0x80;
     delegate bool EnumProc(IntPtr h, IntPtr l);
 
     static IntPtr Found;
@@ -42,6 +61,72 @@ public class MinMode {
         string t = sb.ToString();
         if (t.StartsWith("DM Ultra")) { Found = h; return false; }
         return true;
+    }
+
+    // True when the window sits at the park position (browser.rs park()).
+    // Windows also reports (-32000,-32000) for any iconic window, so this is
+    // only meaningful inside IsOutOfSight, as one of the three ways a window
+    // can be off the desktop.
+    public static bool IsParkedOffScreen(IntPtr h) {
+        RECT r;
+        if (!GetWindowRect(h, out r)) return false;
+        return r.Left <= -10000 || r.Right <= -10000;
+    }
+
+    // The user-visible contract of D-007: the window is gone from the desktop.
+    // Iconic, hidden and parked all qualify; only an on-screen window does not.
+    public static bool IsOutOfSight(IntPtr h) {
+        if (!IsWindow(h)) return true;
+        return !IsWindowVisible(h) || IsIconic(h) || IsParkedOffScreen(h);
+    }
+
+    // Win32 owns a taskbar button for a WS_VISIBLE window that is not a tool
+    // window; an iconic window keeps its button too.
+    public static bool HasTaskbarButton(IntPtr h) {
+        if (!IsWindow(h)) return false;
+        if (IsIconic(h)) return true;
+        if (!IsWindowVisible(h)) return false;
+        long ex = GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64();
+        return (ex & WS_EX_TOOLWINDOW) == 0;
+    }
+
+    public static string Describe(IntPtr h) {
+        RECT r;
+        string pos = GetWindowRect(h, out r)
+            ? string.Format("({0},{1})", r.Left, r.Top) : "(no rect)";
+        return string.Format("iconic={0} visible={1} at={2} taskbar={3}",
+            IsIconic(h), IsWindowVisible(h), pos, HasTaskbarButton(h));
+    }
+
+    static IntPtr MainHwnd;
+    static List<IntPtr> Others = new List<IntPtr>();
+    static bool CbOther(IntPtr h, IntPtr l) {
+        uint owner;
+        GetWindowThreadProcessId(h, out owner);
+        if (owner != Pid || h == MainHwnd) return true;
+        var sb = new StringBuilder(256);
+        GetWindowTextW(h, sb, 256);
+        // Skip the untitled helper windows every GL/IME process owns.
+        if (sb.Length == 0) return true;
+        string t = sb.ToString();
+        if (t == "__wglDummyWindowFodder" || t == "NVOGLDC invisible"
+            || t == "MSCTFIME UI" || t == "Default IME") return true;
+        Others.Add(h);
+        return true;
+    }
+
+    // Every other titled top-level window of this process = the popouts that
+    // make gui.rs park the main window even in plain "taskbar" mode.
+    public static IntPtr[] OtherTopWindows(uint pid, IntPtr main) {
+        Pid = pid; MainHwnd = main; Others = new List<IntPtr>();
+        EnumWindows(new EnumProc(CbOther), IntPtr.Zero);
+        return Others.ToArray();
+    }
+
+    public static string Title(IntPtr h) {
+        var sb = new StringBuilder(256);
+        GetWindowTextW(h, sb, 256);
+        return sb.ToString();
     }
 }
 "@
@@ -105,11 +190,23 @@ try {
     Set-Mode 'taskbar'
     $current = Start-App
     $h = $current.Hwnd
+    # gui.rs:2348 parks the window even in this mode while a popout is open
+    # (has_child), because the popout is painted by the root frame. Measure the
+    # app's own popout windows instead of assuming there are none - a leftover
+    # progress window in the state file otherwise silently changes the expected
+    # outcome here (that is what made this check flip between two runs).
+    $popouts = @([MinMode]::OtherTopWindows([uint32]$current.Proc.Id, $h))
+    $popoutNote = if ($popouts.Count) { ': ' + ((($popouts | ForEach-Object { [MinMode]::Title($_) })) -join '; ') } else { ' none' }
+    Write-Host ("  popouts open before minimize: {0}{1}" -f $popouts.Count, $popoutNote)
     $results += Show-Check 'taskbar: window starts visible' ([MinMode]::IsWindowVisible($h)) ''
     [MinMode]::ShowWindow($h, 6) | Out-Null       # SW_MINIMIZE
     Start-Sleep -Milliseconds 1200
-    $results += Show-Check 'taskbar: minimize keeps the window iconic' ([MinMode]::IsIconic($h)) ''
-    $results += Show-Check 'taskbar: window stays on the taskbar' ([MinMode]::IsWindowVisible($h)) ''
+    # No popout -> a real iconic minimize. Popout open -> parked off-screen,
+    # still on the taskbar. Anything else is a regression.
+    $minimized = if ($popouts.Count -eq 0) { [MinMode]::IsIconic($h) } else { [MinMode]::IsOutOfSight($h) }
+    $results += Show-Check 'taskbar: minimize leaves the window off the desktop' $minimized `
+        ("popouts={0} {1}" -f $popouts.Count, [MinMode]::Describe($h))
+    $results += Show-Check 'taskbar: window stays on the taskbar' ([MinMode]::HasTaskbarButton($h)) ([MinMode]::Describe($h))
     $log = Log-Text
     $results += Show-Check 'taskbar: tray icon was created' ($log -match 'tray icon created') ''
     $results += Show-Check 'taskbar: no tray visibility failure' ($log -notmatch 'could not change tray icon visibility') ''
@@ -120,8 +217,11 @@ try {
     $h = $current.Hwnd
     [MinMode]::ShowWindow($h, 6) | Out-Null
     Start-Sleep -Milliseconds 1200
+    # D-007: this mode parks the window off-screen instead of minimizing it, so
+    # it is out of sight but still owns its taskbar button (WS_VISIBLE, no
+    # WS_EX_TOOLWINDOW). Clicking that button unparks it.
     $results += Show-Check 'taskbar+tray: minimize keeps the taskbar button' `
-        ([MinMode]::IsIconic($h) -and [MinMode]::IsWindowVisible($h)) ''
+        ([MinMode]::HasTaskbarButton($h) -and [MinMode]::IsOutOfSight($h)) ([MinMode]::Describe($h))
     $results += Show-Check 'taskbar+tray: tray icon present' `
         ((Log-Text) -match 'tray icon created' -and (Log-Text) -notmatch 'tray icon unavailable') ''
 
@@ -131,8 +231,9 @@ try {
     $h = $current.Hwnd
     [MinMode]::ShowWindow($h, 6) | Out-Null
     Start-Sleep -Milliseconds 1400
-    $results += Show-Check 'tray only: window hidden' (-not [MinMode]::IsWindowVisible($h)) ''
-    $results += Show-Check 'tray only: not left iconic (taskbar button gone)' (-not [MinMode]::IsIconic($h)) ''
+    $results += Show-Check 'tray only: window out of sight' ([MinMode]::IsOutOfSight($h)) ([MinMode]::Describe($h))
+    $results += Show-Check 'tray only: parked, not iconic' (-not [MinMode]::IsIconic($h)) ([MinMode]::Describe($h))
+    $results += Show-Check 'tray only: taskbar button gone' (-not [MinMode]::HasTaskbarButton($h)) ([MinMode]::Describe($h))
     $results += Show-Check 'tray only: logged the tray minimize' `
         ((Log-Text) -match 'minimize button hid the main window to the tray') ''
 
@@ -141,8 +242,8 @@ try {
     Start-Sleep -Milliseconds 1500
     $alive = $null -ne (Get-Process dmultra -ErrorAction SilentlyContinue)
     $results += Show-Check 'tray only: close hides instead of quitting' $alive ("process alive={0}" -f $alive)
-    $results += Show-Check 'tray only: close keeps the window hidden' `
-        ($alive -and -not [MinMode]::IsWindowVisible($h)) ''
+    $results += Show-Check 'tray only: close keeps the window out of sight' `
+        ($alive -and [MinMode]::IsOutOfSight($h) -and -not [MinMode]::HasTaskbarButton($h)) ([MinMode]::Describe($h))
 }
 finally {
     Stop-App

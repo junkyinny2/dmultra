@@ -12,6 +12,11 @@
 # the progress window and measures how much of the progress bar is painted.
 # A frozen-at-0% window paints none of it.
 #
+# "Minimized" here means out of sight, not iconic: since v0.073 (D-007) the app
+# parks the main window off-screen and keeps it WS_VISIBLE in the tray modes,
+# because eframe only paints the child progress popout from a non-iconic root.
+# Asserting IsIconic was the stale assumption that failed against v0.073-v0.076.
+#
 # Usage: .\test-minimized-progress.ps1
 #        .\test-minimized-progress.ps1 -Background
 #
@@ -55,6 +60,10 @@ public class MinProg {
     [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h, ref POINT p);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr h, int idx);
+    const int GWL_EXSTYLE = -20;
+    const int WS_EX_TOOLWINDOW = 0x80;
     delegate bool EnumProc(IntPtr h, IntPtr l);
 
     static IntPtr Found;
@@ -78,6 +87,26 @@ public class MinProg {
         string t = sb.ToString();
         if (t.StartsWith(Prefix)) { Found = h; return false; }
         return true;
+    }
+
+    // The park position used by browser.rs park() - the state a minimized
+    // main window is actually in under the tray modes (D-007).
+    public static bool IsParkedOffScreen(IntPtr h) {
+        RECT r;
+        if (!GetWindowRect(h, out r)) return false;
+        return r.L <= -10000 || r.R <= -10000;
+    }
+
+    public static bool IsOutOfSight(IntPtr h) {
+        if (!IsWindow(h)) return true;
+        return !IsWindowVisible(h) || IsIconic(h) || IsParkedOffScreen(h);
+    }
+
+    public static string Describe(IntPtr h) {
+        RECT r;
+        string pos = GetWindowRect(h, out r)
+            ? string.Format("({0},{1})", r.L, r.T) : "(no rect)";
+        return string.Format("iconic={0} visible={1} at={2}", IsIconic(h), IsWindowVisible(h), pos);
     }
 
     public static Bitmap Capture(IntPtr h) {
@@ -235,13 +264,14 @@ try {
     Start-Sleep -Milliseconds 900
 
     if ($Background) {
-        $results += Show-Check 'background launch keeps the main window hidden' `
-            (-not [MinProg]::IsWindowVisible($mainWindow)) ''
+        $results += Show-Check 'background launch keeps the main window out of sight' `
+            ([MinProg]::IsOutOfSight($mainWindow)) ([MinProg]::Describe($mainWindow))
     } else {
         # Minimized and parked the way a browser click typically finds it.
         [MinProg]::ShowWindow($mainWindow, 6) | Out-Null   # SW_MINIMIZE
         Start-Sleep -Milliseconds 600
-        $results += Show-Check 'main window minimized' ([MinProg]::IsIconic($mainWindow)) ''
+        $results += Show-Check 'main window out of sight (iconic or parked)' `
+            ([MinProg]::IsOutOfSight($mainWindow)) ([MinProg]::Describe($mainWindow))
     }
 
     # Queue the link exactly like dmultra-nmh does.
@@ -277,12 +307,10 @@ try {
 
     # The UI must have caught up even though the main window never appeared.
     Start-Sleep -Milliseconds 1500
-    if ($Background) {
-        $results += Show-Check 'main window stayed hidden' `
-            (-not [MinProg]::IsWindowVisible($mainWindow)) ''
-    } else {
-        $results += Show-Check 'main window still minimized' ([MinProg]::IsIconic($mainWindow)) ''
-    }
+    # The main window must have stayed out of sight the whole time - parked or
+    # iconic, either is fine, but it must never have popped back on screen.
+    $results += Show-Check 'main window stayed out of sight' `
+        ([MinProg]::IsOutOfSight($mainWindow)) ([MinProg]::Describe($mainWindow))
 
     $coverage = -1.0
     if ($progressWindow -ne [IntPtr]::Zero) {

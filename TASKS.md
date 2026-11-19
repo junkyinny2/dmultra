@@ -18,7 +18,47 @@ per-version detail. Add new work under **Todo**, newest P0 first.
       (memory files complete and fresh), `save -Note "..."` (stamp a checkpoint).
 - [x] Checkpoint discipline recorded in `AGENTS.md`: save at milestones and before compaction.
 - [x] Repaired the git worktree pointer that the folder cleanup broke (`PROJECT_STATUS.md` 7.9).
-- [ ] Proof not yet run by you: `cd C:\dmultra-base; .\checkpoint.ps1 verify` must exit 0.
+- [x] Proof run: `cd C:\dmultra-base; .\checkpoint.ps1 verify` -> exit 0
+      ("PASS memory system is complete and current", measured 2026-11-19).
+
+### v0.076 follow-up - the three stale GUI scripts + a one-command milestone check (done 2026-11-19)
+
+- [x] `test-minimize-modes.ps1`, `test-minimized-progress.ps1` and
+      `test-minimized-capture.ps1` now assert the D-007 contract instead of an
+      iconic minimize. Each gained `IsParkedOffScreen` / `IsOutOfSight` /
+      `HasTaskbarButton` helpers (built on `GetWindowRect` and
+      `WS_EX_TOOLWINDOW`) and prints `iconic= visible= at= taskbar=` on every
+      check. Proof run against the deployed v0.076, each in a fresh shell:
+      minimize-modes 13 PASS / 0 FAIL (exit 0), minimized-progress 6 PASS /
+      0 FAIL (exit 0, bar painted 94 %, popout close latency 2 ms),
+      minimized-capture exit 0 reporting `main still out of sight: True`.
+- [x] Proven that the scripts were wrong and not the app: before the change the
+      same three scripts failed only their iconic checks (modes 6/8/12, progress
+      2 of its 6, capture threw at its minimize step) while every real behaviour
+      passed - popout opened while out of sight, transfer completed, progress bar
+      painted 94 %, popout close latency 3 ms.
+- [x] `test-minimize-modes.ps1` now counts the app's own popout windows before
+      the minimize and expects a genuine iconic minimize only when none are open,
+      because `gui.rs:2348` parks the window in *any* mode while a popout is
+      open. That is why one run parked in "taskbar" mode and the next did not: a
+      leftover download in `state.json` had its progress window open at startup.
+      Proof: `unused\probe-taskbar.ps1` prints the app's titled top-level windows
+      before and after the minimize (`Download status - minimized-progress-test.bin`
+      was open; with the leftover removed, popouts=0 and the minimize is iconic).
+- [x] `checkpoint.ps1` has a `test` mode: cargo test + the extension's
+      `node --test` suite + `test-window-drag-profile.ps1`, one pass/fail line per
+      suite, exit code = number of red suites, and the dragging median asserted
+      against `-DragMaxMs` (default 1.0 ms) so the D-021 fast path cannot regress
+      silently. `-SkipGui` drops the desktop-dependent harness, `-StopApp` stops a
+      running instance first and restarts it afterwards, and a red suite dumps its
+      full output to `unused\checkpoint-<suite>.txt`. Proof run:
+      `.\checkpoint.ps1 test -StopApp` -> `ok rust unit tests - 29 passed, 0
+      failed`, `ok extension tests - 9 of 9 pass, 0 fail`, `ok gui frame cost -
+      34 idle frames median 0.6 ms, 40 drag frames median 0.1 ms`,
+      `PASS every suite ran green (14 s)`, exit 0. `.\checkpoint.ps1 test -SkipGui`
+      -> same two suites green in 3 s, exit 0.
+- [x] No app code changed, so `VERSION` stays 0.076 and no tag or zip is due
+      (D-015). `.\checkpoint.ps1 verify` still exits 0.
 
 ### P0 - tree green, v0.074 and v0.075 landed - done 2026-11-19
 
@@ -126,13 +166,9 @@ per-version detail. Add new work under **Todo**, newest P0 first.
       it still looked in the repo root), `test-minimize-modes.ps1` 8 pass / 3 fail,
       `test-minimized-progress.ps1` 3 pass / 3 fail, `test-minimized-capture.ps1`
       throws at its minimize step. Proof: `pwsh -NoProfile -File .\<script>`.
-- [ ] Fix the three scripts that still assert an *iconic* minimize: since v0.073 (D-007)
-      the app parks the window off-screen whenever a popout is open or a tray mode is
-      set, which is exactly what `test-minimize-modes.ps1` (3 tray checks),
-      `test-minimized-progress.ps1` (3 checks) and `test-minimized-capture.ps1`
-      (its throw) fail on. Proven pre-existing, not a v0.076 regression:
-      `test-minimized-progress.ps1` fails the identical three checks against the saved
-      v0.075 binary (`C:\dmultra\unused\dmultra-baseline-v0075.exe`).
+- [x] Fix the three scripts that still assert an *iconic* minimize - done, see
+      the "v0.076 follow-up" section above: they now assert out-of-sight plus the
+      taskbar button, and all three exit 0 against the deployed v0.076.
 - [ ] Reload the browser extension (chrome://extensions -> Reload) so the deployed
       `content.js` in `C:\dmultra\browser-extension` is the one actually running, then
       confirm the "Download this video" button disappears within ~6 s of pausing or
@@ -165,8 +201,9 @@ checkboxes are stale, so this list is the live version)
 - [ ] `README.md` still says "RSS feeds" and lists RSS as a feature; there is no RSS
       code in `src/` (AGENTS.md forbids it). Fix the README or re-add RSS deliberately.
 - [ ] Re-sync `PARITY_PLAN.md` checkboxes with what `PROGRESS.md` says shipped.
-- [ ] Give `checkpoint.ps1` a `test` mode that runs `cargo test` + `node --test` and
-      prints one pass/fail line, so a milestone check is one command.
+- [x] Give `checkpoint.ps1` a `test` mode that runs `cargo test` + `node --test` and
+      prints one pass/fail line, so a milestone check is one command - done, and it
+      runs the drag harness too (`.\checkpoint.ps1 test -StopApp`, exit 0 = green).
 - [x] The six regression scripts are back in the repo root and tracked (D-019);
       `test-window-drag-profile.ps1` was added as the seventh in v0.076.
 
@@ -179,7 +216,8 @@ checkboxes are stale, so this list is the live version)
 | Extension tests | `cd C:\dmultra-base; node --test browser-extension/background.test.js browser-extension/content.test.js` | 9 pass, 0 fail (measured 2026-11-19) |
 | Release build | `cd C:\dmultra-base; .\build.ps1 build --release` | ok (kill any running dmultra first) |
 | Memory files | `cd C:\dmultra-base; .\checkpoint.ps1 verify` | must exit 0 |
-| GUI end-to-end | `pwsh -NoProfile -File .\test-<name>.ps1` (fresh process each: `Add-Type` collides in a reused shell) | measured 2026-11-19 on v0.076: placement 7/7, startup-registry 6/6, single-instance 4/4, minimize-modes 8/11, minimized-progress 3/6, minimized-capture throws - every failure is the pre-existing iconic-minimize assumption (D-007) |
+| Everything at once | `cd C:\dmultra-base; .\checkpoint.ps1 test -StopApp` | exit 0 in 14 s (measured 2026-11-19): rust 29/29, extension 9/9, drag median 0.1 ms. `-SkipGui` drops the cursor-dependent harness and finishes in 3 s |
+| GUI end-to-end | `pwsh -NoProfile -File .\test-<name>.ps1` (fresh process each: `Add-Type` collides in a reused shell) | measured 2026-11-19 on v0.076 after the D-007 fix: placement 7/7, startup-registry 6/6, single-instance 4/4, minimize-modes 13/13, minimized-progress 6/6, minimized-capture exit 0 |
 | Frame cost by mode | `pwsh -NoProfile -File .\test-window-drag-profile.ps1` (add `-ChildUrl <url>` to drag with a progress window open) | v0.076: drag 0.2 ms plain / 0.6 ms with a popout, idle median 0.7 ms, live median 0.8 ms. v0.075 measured 200.5 / 402.7 / 200.6 / 402.2 ms |
 
 Deploy after a release build: copy `target\release\dmultra.exe` AND
