@@ -3,7 +3,9 @@
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$exe = Join-Path $root 'dmultra.exe'
+# The repo tree holds no binaries (AGENTS.md: build output stays ignored); the
+# deployed binary is the one under test.
+$exe = 'C:\dmultra\dmultra.exe'
 $stateDir = Join-Path $env:APPDATA 'dmultra'
 $statePath = Join-Path $stateDir 'state.json'
 $showRequest = Join-Path $stateDir 'show.request'

@@ -58,8 +58,10 @@ fn current_palette() -> options::ThemePalette {
 // ---------------------------------------------------------------------------
 #[cfg(target_os = "windows")]
 mod native_win {
+    use std::collections::HashMap;
     use std::ffi::c_int;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
     /// Titles of our own OS windows that must follow the app theme.
     pub const OUR_TITLES_EXACT: [&str; 6] = [
@@ -113,6 +115,8 @@ mod native_win {
         fn GetWindowTextW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
         fn GetWindowRect(hwnd: isize, rect: *mut RectL) -> i32;
         fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+        fn IsWindow(hwnd: isize) -> i32;
+        fn GetDoubleClickTime() -> u32;
         fn SystemParametersInfoW(action: u32, param: u32, pv: *mut RectL, win_ini: u32) -> i32;
         fn GetSystemMetrics(index: i32) -> i32;
         fn GetDpiForSystem() -> u32;
@@ -155,6 +159,41 @@ mod native_win {
         }
     }
 
+    /// Our own top-level windows as of the last scan, and what has already
+    /// been painted with the current theme.
+    ///
+    /// `EnumWindows` walks the top-level windows of every process on the
+    /// desktop and blocks inside win32k while doing it: measured on this
+    /// machine a single sweep of ~340 windows costs ~200 ms and the thread is
+    /// waiting, not working. Calling it once per frame therefore caps the app
+    /// at ~5 fps, which is what makes window dragging choppy and clicks feel
+    /// delayed. The sweep is cached here and only repeated when the set of
+    /// windows we own has actually changed.
+    struct ChromeCache {
+        /// (hwnd, title) of every top-level window owned by this process.
+        windows: Vec<(isize, String)>,
+        /// Theme signature last applied to each of those windows.
+        applied: HashMap<isize, u64>,
+        /// When the last sweep ran (None until the first one).
+        scanned: Option<Instant>,
+    }
+
+    fn cache() -> &'static Mutex<ChromeCache> {
+        static CACHE: OnceLock<Mutex<ChromeCache>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(ChromeCache {
+            windows: Vec::new(),
+            applied: HashMap::new(),
+            scanned: None,
+        }))
+    }
+
+    fn lock_cache() -> std::sync::MutexGuard<'static, ChromeCache> {
+        match cache().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     static COLLECTED: Mutex<Vec<(isize, String)>> = Mutex::new(Vec::new());
 
     extern "system" fn collect_cb(hwnd: isize, _lparam: isize) -> i32 {
@@ -185,67 +224,122 @@ mod native_win {
             || text.starts_with(OUR_TITLES_PREFIX)
     }
 
-    /// Refresh the snapshot of our top-level windows.
-    fn enumerate() {
+    /// FNV-1a over everything the title-bar theme depends on, so a palette
+    /// change is detected without comparing colour arrays every frame.
+    fn theme_signature(dark: bool, caption: [u8; 3], text: [u8; 3], border: [u8; 3]) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |byte: u8| {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        };
+        feed(dark as u8);
+        for byte in caption.iter().chain(text.iter()).chain(border.iter()) {
+            feed(*byte);
+        }
+        hash
+    }
+
+    /// Sweep the desktop for our windows and store the result. Expensive -
+    /// callers go through `apply_titlebar_theme`, which throttles it.
+    fn scan() {
         if let Ok(mut list) = COLLECTED.lock() {
             list.clear();
         }
         unsafe {
             EnumWindows(collect_cb, 0);
         }
+        let fresh = match COLLECTED.lock() {
+            Ok(mut list) => std::mem::take(&mut *list),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        };
+        let mut guard = lock_cache();
+        guard.windows = fresh;
+        guard.scanned = Some(Instant::now());
     }
 
     /// Paint every window we own with the app's theme colours: dark/light
     /// immersive mode plus an explicit caption/border/text colour, so the
     /// title bar matches the app chrome instead of DWM's plain black.
-    /// Cheap enough to call every frame: DWM ignores attributes whose value
-    /// has not changed, and enumerating our own windows is a few syscalls.
-    /// Calling it every frame means a popout created during this frame is
-    /// themed before it is ever composited with the default title bar.
+    ///
+    /// `expected_windows` is how many of our OS windows the app believes are
+    /// open right now (main window + open popouts and dialogs). A desktop
+    /// sweep runs only when the live count disagrees with that, or the palette
+    /// changed - never on an unchanged frame, and never while the user is
+    /// dragging a window. The DWM attributes themselves are only sent to
+    /// windows that have not already received this exact theme.
+    ///
+    /// Returns true when a sweep found fewer of our windows than expected, so
+    /// the caller can try again next frame (eframe may still be creating one).
     pub fn apply_titlebar_theme(
         dark: bool,
         caption: [u8; 3],
         text: [u8; 3],
         border: [u8; 3],
-    ) {
-        enumerate();
-        let mut windows: Vec<isize> = Vec::new();
-        if let Ok(list) = COLLECTED.lock() {
-            for (hwnd, title) in list.iter() {
-                if is_ours(title) {
-                    windows.push(*hwnd);
-                }
-            }
+        expected_windows: usize,
+    ) -> bool {
+        let signature = theme_signature(dark, caption, text, border);
+
+        let needs_scan = {
+            let guard = lock_cache();
+            let live = guard.windows.iter().filter(|(_, title)| is_ours(title)).count();
+            let stale_theme = guard.applied.values().any(|applied| *applied != signature);
+            let due = guard
+                .scanned
+                .map(|when| when.elapsed() >= Duration::from_millis(100))
+                .unwrap_or(true);
+            due && (guard.scanned.is_none() || live != expected_windows || stale_theme)
+        };
+        if needs_scan {
+            scan();
         }
-        if windows.is_empty() {
-            return;
-        }
+
+        let mut guard = lock_cache();
+        // A window that was closed or recreated is gone: dropping it here is
+        // what makes the next frame notice that its replacement is un-themed.
+        guard.windows.retain(|(hwnd, _)| unsafe { IsWindow(*hwnd) } != 0);
+        guard.applied.retain(|hwnd, _| unsafe { IsWindow(*hwnd) } != 0);
+
+        let ours: Vec<(isize, u64)> = guard
+            .windows
+            .iter()
+            .filter(|(_, title)| is_ours(title))
+            .map(|(hwnd, _)| (*hwnd, guard.applied.get(hwnd).copied().unwrap_or(0)))
+            .collect();
 
         let immersive: i32 = if dark { 1 } else { 0 };
         let caption_ref = colorref(caption) as i32;
         let text_ref = colorref(text) as i32;
         let border_ref = colorref(border) as i32;
         let int_size = std::mem::size_of::<i32>() as u32;
-        for hwnd in windows {
+        for (hwnd, applied) in &ours {
+            if *applied == signature {
+                continue;
+            }
             unsafe {
                 DwmSetWindowAttribute(
-                    hwnd,
+                    *hwnd,
                     DWMWA_USE_IMMERSIVE_DARK_MODE,
                     &immersive,
                     int_size,
                 );
-                DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption_ref, int_size);
-                DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text_ref, int_size);
-                DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border_ref, int_size);
+                DwmSetWindowAttribute(*hwnd, DWMWA_CAPTION_COLOR, &caption_ref, int_size);
+                DwmSetWindowAttribute(*hwnd, DWMWA_TEXT_COLOR, &text_ref, int_size);
+                DwmSetWindowAttribute(*hwnd, DWMWA_BORDER_COLOR, &border_ref, int_size);
             }
         }
+        for (hwnd, _) in &ours {
+            guard.applied.insert(*hwnd, signature);
+        }
+        drop(guard);
+
+        ours.len() < expected_windows
     }
 
-    /// Outer screen rect of the window with exactly `title`, if any.
+    /// Outer screen rect of the window with exactly `title`, if any. Uses the
+    /// cached sweep and only re-sweeps when the window is not in it.
     pub fn window_rect(title: &str) -> Option<(i32, i32, i32, i32)> {
-        enumerate();
-        if let Ok(list) = COLLECTED.lock() {
-            for (hwnd, text) in list.iter() {
+        fn lookup(guard: &ChromeCache, title: &str) -> Option<(i32, i32, i32, i32)> {
+            for (hwnd, text) in guard.windows.iter() {
                 let title_matches = text == title || (title == "DM Ultra" && is_main_title(text));
                 if is_ours(text) && title_matches {
                     let mut rect = RectL::default();
@@ -254,8 +348,35 @@ mod native_win {
                     }
                 }
             }
+            None
         }
-        None
+
+        {
+            let guard = lock_cache();
+            if let Some(rect) = lookup(&guard, title) {
+                return Some(rect);
+            }
+        }
+        scan();
+        let guard = lock_cache();
+        lookup(&guard, title)
+    }
+
+    /// The user's double-click window from the Control Panel (Windows default
+    /// 500 ms). egui hard-codes 300 ms and measures it between frames, so a
+    /// normal double-click is rejected whenever a frame takes longer than that
+    /// - the download list pairs its own clicks with this instead.
+    pub fn double_click_interval() -> Duration {
+        static MILLIS: OnceLock<u32> = OnceLock::new();
+        let millis = *MILLIS.get_or_init(|| {
+            let value = unsafe { GetDoubleClickTime() };
+            if value == 0 {
+                500
+            } else {
+                value
+            }
+        });
+        Duration::from_millis(millis as u64)
     }
 }
 
@@ -798,6 +919,10 @@ pub struct DmApp {
     search_focus: bool,
     search_icon_rect: Rect,
     selected_download_id: Option<u64>,
+    /// Last click on a download row: (download id, when it happened). A second
+    /// click on the same row within the user's double-click window opens that
+    /// download's status window - see `double_click_interval`.
+    last_row_click: Option<(u64, Instant)>,
 
     // Popouts & Child windows
     add_dialog: AddUrlDialogState,
@@ -933,6 +1058,7 @@ impl DmApp {
             search_focus: false,
             search_icon_rect: Rect::NOTHING,
             selected_download_id: None,
+            last_row_click: None,
             add_dialog: AddUrlDialogState {
                 connections: 8,
                 queue: MAIN_QUEUE.to_string(),
@@ -2132,8 +2258,12 @@ impl eframe::App for DmApp {
             crate::browser::hide_main_window();
         }
 
-        // Remember where the main window is (honours the setting).
-        self.track_main_window(ctx);
+        // Remember where the main window is (honours the setting). Skipped
+        // while dragging: the rectangle is just as accurate one frame later,
+        // and writing state.json must never happen inside the move loop.
+        if !dragging {
+            self.track_main_window(ctx);
+        }
 
         // Window behaviour: tray icon and the configured minimize action.
         let minimize_mode = {
@@ -2179,7 +2309,7 @@ impl eframe::App for DmApp {
             .lock()
             .map(|mut flag| std::mem::take(&mut *flag))
             .unwrap_or(false);
-        if !show_requested && self.last_show_poll.elapsed() > Duration::from_millis(300) {
+        if !show_requested && !dragging && self.last_show_poll.elapsed() > Duration::from_millis(300) {
             self.last_show_poll = Instant::now();
             let path = show_request_path();
             if path.exists() {
@@ -2276,30 +2406,41 @@ impl eframe::App for DmApp {
         // Apply styling to egui context
         apply_app_style(ctx);
 
-        self.poll_browser_pending(ctx);
-
-        // The busy/child-window flag is published at the END of the frame,
-        // after every popout has been rendered (see below). Computing it here
-        // would miss a window opened during this frame, which is exactly when
-        // the wake pulse is needed most.
-        // Clipboard watcher: when enabled, copying a download link opens
-        // the Add-URL window and remains active while the app is idle.
-        if settings_snapshot.monitor_clipboard {
-            ctx.request_repaint_after(Duration::from_millis(500));
-            self.tick_clipboard_watcher(ctx, &settings_snapshot);
+        // Everything from here to the frame build reads files, the registry,
+        // the clipboard or the download state. Windows runs a window drag in a
+        // modal loop on THIS thread, so any millisecond spent here is a frame
+        // it cannot use to follow the cursor; while dragging, all of it is
+        // deferred to the first frame after the drag ends.
+        if dragging {
+            ctx.request_repaint_after(Duration::from_millis(50));
         } else {
-            self.clip_last_poll = Instant::now() - Duration::from_secs(5);
+            self.poll_browser_pending(ctx);
+
+            // The busy/child-window flag is published at the END of the frame,
+            // after every popout has been rendered (see below). Computing it
+            // here would miss a window opened during this frame, which is
+            // exactly when the wake pulse is needed most.
+            // Clipboard watcher: when enabled, copying a download link opens
+            // the Add-URL window and remains active while the app is idle.
+            if settings_snapshot.monitor_clipboard {
+                ctx.request_repaint_after(Duration::from_millis(500));
+                self.tick_clipboard_watcher(ctx, &settings_snapshot);
+            } else {
+                self.clip_last_poll = Instant::now() - Duration::from_secs(5);
+            }
+
+            // Live transfer-rate sampling and schedule enforcement run before
+            // the frame is built so the table and status bar show current data.
+            self.sample_speeds();
+            self.scheduler_tick();
         }
 
-        // Live transfer-rate sampling and schedule enforcement run before
-        // the frame is built so the table and status bar show current data.
-        self.sample_speeds();
-        self.scheduler_tick();
-
         // Poll the video overlay heartbeat written by the native messaging
-        // host. The overlay module owns the Win32 button thread.
+        // host. The overlay module owns the Win32 button thread. Reading and
+        // parsing the heartbeat file and re-checking the foreground process is
+        // far too much work for a frame whose only job is to follow a drag.
         #[cfg(windows)]
-        {
+        if !dragging {
             let overlay_path = crate::state::state_dir().join("pending").join("overlay.json");
             let mut fed = false;
             if let Ok(meta) = std::fs::metadata(&overlay_path) {
@@ -2633,6 +2774,7 @@ impl eframe::App for DmApp {
                     Stroke::new(1.0, border_hairline()),
                 );
             });
+
 
         // -------------------------------------------------------------------
         // 2b. Post-download power-action banner (cancellable countdown)
@@ -3163,10 +3305,29 @@ impl eframe::App for DmApp {
                             if row_interact.clicked() {
                                 self.selected_download_id = Some(d.id);
                             }
-                            if row_interact.double_clicked() {
-                                if !self.active_details_popouts.contains(&d.id) {
-                                    self.active_details_popouts.push(d.id);
-                                }
+                            // egui's own `double_clicked()` needs the second
+                            // press within 300 ms of the first release and
+                            // measures both against frame timestamps, so a
+                            // normal Windows double-click (500 ms by default)
+                            // is rejected whenever a frame is slower than that
+                            // - which is exactly when the app felt dead. Pair
+                            // the clicks here using the user's own double-click
+                            // speed instead; egui's flag still counts when it
+                            // does fire.
+                            let now = Instant::now();
+                            let paired_click = self
+                                .last_row_click
+                                .map(|(id, then)| {
+                                    id == d.id && now - then <= double_click_interval()
+                                })
+                                .unwrap_or(false);
+                            self.last_row_click = if paired_click {
+                                None
+                            } else {
+                                Some((d.id, now))
+                            };
+                            if paired_click || row_interact.double_clicked() {
+                                self.open_progress_popout(d.id);
                             }
 
                             // Context menu for the row.
@@ -3354,9 +3515,14 @@ impl eframe::App for DmApp {
         let expected = self.active_details_popouts.len() + dialog_count;
         let signature_changed = signature != self.hook_signature;
         self.hook_signature = signature;
-        if signature_changed
-            || self.hook_pending
-            || (expected > 0 && self.last_hook_refresh.elapsed() >= Duration::from_millis(250))
+        if signature_changed && dragging {
+            // The child-window set changed while Windows' modal move loop owns
+            // this thread. Remember to do the sweep once the drag ends.
+            self.hook_pending = true;
+        } else if !dragging
+            && (signature_changed
+                || self.hook_pending
+                || (expected > 0 && self.last_hook_refresh.elapsed() >= Duration::from_secs(2)))
         {
             self.last_hook_refresh = Instant::now();
             let found = crate::browser::refresh_popup_hooks();
@@ -3402,9 +3568,11 @@ impl eframe::App for DmApp {
         // app theme. Done last so a popout created during THIS frame is
         // themed before it is composited - otherwise the OS shows its
         // default title bar (white, or plain black in dark mode) until the
-        // next themed pass.
+        // next themed pass. Skipped while dragging: discovering the windows
+        // to paint costs far more than the paint, and no window can be
+        // created or destroyed inside the move loop.
         #[cfg(target_os = "windows")]
-        {
+        if !dragging {
             native_win::apply_titlebar_theme(
                 palette.dark,
                 [
@@ -3418,6 +3586,8 @@ impl eframe::App for DmApp {
                     palette.border.g(),
                     palette.border.b(),
                 ],
+                // The main window plus every popout/dialog we believe is open.
+                1 + expected,
             );
         }
 
@@ -4448,6 +4618,16 @@ impl DmApp {
         }
     }
 
+    /// Show the Download status window for `id` - always its own OS window
+    /// (AGENTS.md: download windows are never panes inside the main window).
+    /// Progress popouts are rendered after the table in this same frame, so
+    /// the window appears without waiting for another one.
+    fn open_progress_popout(&mut self, id: u64) {
+        if !self.active_details_popouts.contains(&id) {
+            self.active_details_popouts.push(id);
+        }
+    }
+
     fn table_header_cell(
         &self,
         ui: &mut Ui,
@@ -4587,7 +4767,13 @@ impl DmApp {
         if changed {
             self.popout_pos_dirty = true;
         }
-        if self.popout_pos_dirty && self.last_popout_save.elapsed() >= Duration::from_millis(500) {
+        // Never write state.json from inside the modal move loop: the save
+        // clones and rewrites the whole download list. The new value is kept
+        // in memory and flushed once the drag ends (or on close / exit).
+        if self.popout_pos_dirty
+            && !crate::browser::main_window_dragging()
+            && self.last_popout_save.elapsed() >= Duration::from_millis(500)
+        {
             self.flush_popout_positions();
         }
     }
@@ -4612,6 +4798,20 @@ impl DmApp {
 // ---------------------------------------------------------------------------
 // Helpers & Components
 // ---------------------------------------------------------------------------
+
+/// How close two clicks on the same download row must be to count as one
+/// double-click: the user's own value from Control Panel > Mouse
+/// (`GetDoubleClickTime`, Windows default 500 ms).
+fn double_click_interval() -> Duration {
+    #[cfg(target_os = "windows")]
+    {
+        native_win::double_click_interval()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Duration::from_millis(500)
+    }
+}
 
 /// A data cell always reserves its full column width, even when its text is
 /// short. The child UI clips and truncates content without changing the row
