@@ -1,5 +1,48 @@
 # DM Ultra - Project Rules for Agents
 
+
+# Persistent AI Memory Rules
+
+You are working on an ongoing software project.
+Your conversation history is NOT your permanent memory.
+
+## Before starting work
+1. Read PROJECT_STATUS.md.
+2. Read TASKS.md.
+3. Read DECISIONS.md when relevant.
+4. Inspect the existing code before making changes.
+5. Continue from the current project state. Do not restart or duplicate completed work.
+
+## During development
+1. Keep PROJECT_STATUS.md updated.
+2. Record important architectural decisions in DECISIONS.md.
+3. Update TASKS.md as tasks are completed.
+4. Record important changes in CHANGELOG.md.
+5. Do not rely on conversation history to remember important decisions.
+
+## Before context runs out
+Create a detailed checkpoint containing:
+- What we are building.
+- What has been completed.
+- What files have been modified.
+- What is currently being worked on.
+- What remains unfinished.
+- Errors encountered and their solutions.
+- Important decisions and requirements.
+- The exact next steps.
+
+Save the checkpoint to PROJECT_STATUS.md.
+
+Do not wait until the context window is completely full.
+Update memory at meaningful milestones and before compaction.
+
+## When continuing in a new conversation
+Read the project memory files first.
+Verify the current state of the code.
+Resume the unfinished work without asking the user
+to explain the project again.
+
+
 ## HARD RULE: Download windows are ALWAYS separate OS windows
 
 Always recompile the binary when done, then zip the source code and binaries and put them in files with build version in the filename.

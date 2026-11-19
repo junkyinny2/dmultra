@@ -7,3 +7,10 @@
 browser-key.xml
 desktop_strings*.txt
 idm-ghidra-decompile/
+# Reverse-engineering input material (1.2 MB, not needed to build).
+/reference/
+# Holding area for items moved out of the clean tree, plus scratch logs.
+/unused/
+# Release snapshots (source + both exes) live outside the tree.
+/releases/
+*.log

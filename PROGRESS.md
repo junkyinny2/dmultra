@@ -227,3 +227,35 @@
 - `test-minimized-progress.ps1` now also posts `WM_CLOSE` to the
   status window and asserts it hides within 2 s. Measured on this machine:
   close latency 401 ms with the window hidden and a completed download.
+
+## v0.074 - the status window "Open" button really opens the file
+- The "Download status - <file>" popout's **Open** button ran
+  `explorer.exe <save_path>`. Explorer never runs a file that way - it just
+  opens a window on the folder holding it - so the button looked like a second
+  "Open Folder" and never launched the download. It now uses the shell open
+  verb (`ShellExecuteW` with `"open"`, declared with plain FFI in `gui.rs`, so
+  no new crate is pulled in), which is exactly what a double-click in Explorer
+  does.
+- The list context menu's "Open File" had the same bug and goes through the new
+  path too. "Open Folder", "Open Containing Folder" and File → Open Save Folder
+  are untouched: `explorer.exe` is the right tool for a folder.
+- Both call sites now share `DmApp::open_download_file`, which reports the
+  outcome in the status bar and writes an `OPEN` line to the diagnostic log -
+  the popout is its own OS window, so the main window's status bar is the place
+  a failure can actually be seen.
+- Open is disabled with an explanatory tooltip until the file is on disk
+  (`open_action_blocker` covers an empty save path, a file still being written,
+  and a folder), so a click during a download can no longer seem to do nothing.
+- Tests: new `gui::open_action_tests` (3 tests) covers the openable /
+  not-openable decision. `shell_open` itself is never called from a test because
+  it would launch the registered application.
+- Pre-existing test failure, unrelated to this change and left as-is:
+  `browser::tests::generated_extension_manifests_use_the_application_version`.
+  `browser.rs` pins `EXT_VERSION = "0.28.2"` while `Cargo.toml` is still
+  `version = "0.28.0"`, and the test asserts the two match; the released
+  `dmultra-v0.073` snapshot carries the same mismatch. Either bump `Cargo.toml`
+  to 0.28.2 or set `EXT_VERSION` to `env!("CARGO_PKG_VERSION")` to make it
+  permanent.
+- Built with `.\build.ps1 build --release`, both `dmultra.exe` and
+  `dmultra-nmh.exe` deployed to `C:\dmultra\`, source + binaries zipped as
+  `unused\releases\dmultra-v0.074-<date>.zip`.
