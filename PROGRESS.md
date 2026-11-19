@@ -322,8 +322,9 @@
   caption with `WM_NCHITTEST` and checks `WindowFromPoint`, because `GetWindowRect`
   includes the invisible resize border and another application's window over the
   caption steals the synthesized click - Excel did exactly that, which is why the
-  first runs reported no drag frames at all. It falls back to a posted
-  `WM_NCLBUTTONDOWN` when our window is not topmost.
+  first runs reported no drag frames at all. It raises our window first, escalates to
+  `SwitchToThisWindow` when `SetForegroundWindow` is refused, and throws if the window
+  never moved instead of reporting zero drag frames as if they were a measurement.
 - Measured on this machine, same script, same desktop, before and after:
 
   | situation | v0.075 | v0.076 |

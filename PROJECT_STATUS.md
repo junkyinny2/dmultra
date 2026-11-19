@@ -12,7 +12,7 @@ Resume order for a new conversation (do not ask the user to re-explain the proje
    history (it is the source of truth for what shipped; `PARITY_PLAN.md` checkboxes
    are stale for phases 2-8).
 
-Last checkpoint: 2026-11-19 15:26 - v0.076 released: cached window sweep + drag fast path (402 ms -> 0.6 ms/frame), double-click via GetDoubleClickTime, drag-profile harness proven [git 74ad8ad master, dirty=5, VERSION 0.076]
+Last checkpoint: 2026-11-19 15:41 - drag-profile harness hardened (SwitchToThisWindow escalation + throws when the drag never engaged); re-measured on the shipped v0.076: 40 drag frames at 0.2 ms, idle median 0.3 ms [git 6162660 master, dirty=4, VERSION 0.076]
 Refresh: `.\checkpoint.ps1 save -Note "what just changed"`
 Briefing: `.\checkpoint.ps1 status`
 Self-check: `.\checkpoint.ps1 verify` (fails if a memory file is missing, thin or stale)
@@ -149,7 +149,7 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
 | 7.14 | Native messaging silently did nothing | Registry written to the Firefox-style `NativeMessaging\Hosts` path | Must be `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.dmultra.nm` (one word) |
 | 7.15 | Browser integration blocked on this machine | Defender ASR + AppContainer for NM hosts; `HKCU\Software\Policies` is ACL-locked | Keep the `C:\dmultra` exclusion and the ALL APPLICATION PACKAGES grants on `C:\dmultra` and the pending dir |
 | 7.16 | Dragging the window was choppy, clicks felt ignored, the app ran at ~5 fps | `apply_titlebar_theme` called `EnumWindows` once per frame; one sweep of ~340 top-level windows costs ~200 ms inside win32k on this machine, and Windows runs a title-bar drag in a modal loop on the GUI thread, so the drag could only advance one frame per step (~400 ms/step with a popout open) | Cache the sweep and skip it - plus the hook sweep and every file / registry / clipboard / state read - while `main_window_dragging()` is true (`gui.rs::native_win::ChromeCache`, v0.076, D-021). Measured 402 ms -> 0.6 ms per frame |
-| 7.17 | `test-window-drag-profile.ps1` said "no drag frames" and the window never moved | Not an app bug: `GetWindowRect` includes the invisible resize border, and Excel's window was sitting over the caption, so the synthesized click landed in Excel | The harness raises our window first, finds the caption with `WM_NCHITTEST`, verifies with `WindowFromPoint` + `GetAncestor`, and falls back to a posted `WM_NCLBUTTONDOWN` |
+| 7.17 | `test-window-drag-profile.ps1` said "no drag frames" and the window never moved | Not an app bug: `GetWindowRect` includes the invisible resize border, and Excel's window was sitting over the caption, so the synthesized click landed in Excel | The harness raises our window first, finds the caption with `WM_NCHITTEST`, verifies with `WindowFromPoint` + `GetAncestor`, escalates to `SwitchToThisWindow` when `SetForegroundWindow` is refused, and throws if the window never moved |
 | 7.18 | `test-single-instance.ps1` could not start: "cannot find C:\dmultra-base\dmultra.exe" | The script still pointed at the repo root, a pre-cleanup layout; the repo tree holds no binaries | Point it at the deployed `C:\dmultra\dmultra.exe` (v0.076) - 4/4 PASS after the change |
 
 ## 8. Exact next steps
@@ -188,6 +188,7 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
   work is mid-flight.
 
 <!-- CHECKPOINT:BEGIN -->
+- 2026-11-19 15:41 | git 6162660 master dirty=4 | drag-profile harness hardened (SwitchToThisWindow escalation + throws when the drag never engaged); re-measured on the shipped v0.076: 40 drag frames at 0.2 ms, idle median 0.3 ms
 - 2026-11-19 15:26 | git 74ad8ad master dirty=5 | v0.076 released: cached window sweep + drag fast path (402 ms -> 0.6 ms/frame), double-click via GetDoubleClickTime, drag-profile harness proven
 - 2026-11-19 10:44 | git 0a3764a master dirty=2 | checkpoint.ps1 now resolves the derived extension version
 - 2026-11-19 10:36 | git de04574 master dirty=2 | post-release bookkeeping: publish and browser-integration reinstall recorded

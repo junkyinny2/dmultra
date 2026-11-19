@@ -70,7 +70,8 @@ per-version detail. Add new work under **Todo**, newest P0 first.
       rule, which a 200-400 ms frame always rejected (D-022).
 - [x] `test-window-drag-profile.ps1` is tracked and reliable: it finds the caption with
       `WM_NCHITTEST`, verifies with `WindowFromPoint` + `GetAncestor`, raises our window
-      first and falls back to a posted `WM_NCLBUTTONDOWN`. The earlier "no drag frames"
+      first, escalates to `SwitchToThisWindow` when `SetForegroundWindow` is refused, and
+      throws if the window never moved instead of reporting zero drag frames. The earlier "no drag frames"
       runs were the harness, not the app - Excel's window was over the caption and took
       the synthesized click (proved with `unused\probe-hwnd.ps1`).
 - [x] Popout close latency in the same run: 288 ms (v0.075) -> 4 ms (v0.076).

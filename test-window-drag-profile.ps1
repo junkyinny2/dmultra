@@ -50,6 +50,7 @@ Add-Type -Namespace DmDrag -Name Win -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT pt);
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hwnd, bool altTab);
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
 public struct RECT { public int Left, Top, Right, Bottom; }
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
@@ -145,50 +146,71 @@ function Get-RootUnder([int] $x, [int] $y) {
 
 $grabX = $rect.Left + [int] (($rect.Right - $rect.Left) / 2)
 
-# Bring our window above everything else before probing or clicking. Another
-# application's window sitting over the caption takes the click instead - Excel
-# did exactly that on this machine, and the drag silently did nothing.
-[void] [DmDrag.Win]::SetForegroundWindow($hwnd)
-Start-Sleep -Milliseconds 400
+function Find-CaptionPoint([IntPtr] $h, $r, [int] $x) {
+    foreach ($dy in 4, 8, 12, 16, 20, 24, 28, 32) {
+        $probeY = $r.Top + $dy
+        $hit = Get-HitTest $h $x $probeY
+        $root = Get-RootUnder $x $probeY
+        Write-Host ("  ({0},{1}): hit-test={2} root-under-point={3} (want {4})" -f $x, $probeY, $hit, $root, $h)
+        if ($hit -eq 2 -and $root -eq $h) { return $probeY }
+    }
+    return $null
+}
 
-$grabY = $null
-$method = 'physical'
+function Invoke-CaptionDrag([int] $x, [int] $y) {
+    [void] [DmDrag.Win]::SetCursorPos($x, $y)
+    Start-Sleep -Milliseconds 250
+    [DmDrag.Win]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)   # LEFTDOWN
+    Start-Sleep -Milliseconds 250
+    for ($i = 1; $i -le $Steps; $i++) {
+        [void] [DmDrag.Win]::SetCursorPos(($x + $i * 12), ($y + $i * 4))
+        Start-Sleep -Milliseconds $StepDelayMs
+    }
+    [DmDrag.Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)   # LEFTUP
+    Start-Sleep -Seconds 2
+}
+
+# Raise our window above everything else before probing or clicking: another
+# application's window over the caption takes the click instead (Excel did
+# exactly that on this machine) and the drag then silently does nothing.
+# SetForegroundWindow may legitimately be refused - Windows lets a process that
+# was not started in the foreground keep it - so fall back to SwitchToThisWindow,
+# which is what Alt+Tab uses and is not refused.
 Write-Host 'caption probe (HTCLIENT=1, HTCAPTION=2, HTTOP=12):'
-foreach ($dy in 4, 8, 12, 16, 20, 24, 28, 32) {
-    $probeY = $rect.Top + $dy
-    $hit = Get-HitTest $hwnd $grabX $probeY
-    $root = Get-RootUnder $grabX $probeY
-    Write-Host ("  ({0},{1}): hit-test={2} root-under-point={3} (want {4})" -f $grabX, $probeY, $hit, $root, $hwnd)
-    if ($hit -eq 2 -and $root -eq $hwnd) { $grabY = $probeY; break }
+[void] [DmDrag.Win]::SetForegroundWindow($hwnd)
+Start-Sleep -Milliseconds 500
+$grabY = Find-CaptionPoint $hwnd $rect $grabX
+if ($null -eq $grabY) {
+    Write-Host 'not topmost after SetForegroundWindow; retrying with SwitchToThisWindow'
+    [DmDrag.Win]::SwitchToThisWindow($hwnd, $true)
+    Start-Sleep -Milliseconds 700
+    $grabY = Find-CaptionPoint $hwnd $rect $grabX
 }
 if ($null -eq $grabY) {
-    # The window is on top of nothing we control: fall back to posting the
-    # caption press straight to our window. The modal move loop it starts
-    # captures the mouse, so the Z-order under the cursor stops mattering.
-    $grabY = $rect.Top + 20
-    $method = 'posted WM_NCLBUTTONDOWN'
-    Write-Host ("our window is not topmost at the caption; using {0} at ({1},{2})" -f $method, $grabX, $grabY)
-} else {
-    Write-Host ("grabbing the caption at ({0},{1}) with a physical click" -f $grabX, $grabY)
+    throw 'our window will not come to the top of the Z-order at its caption - close whatever covers it and re-run'
 }
+Write-Host ("grabbing the caption at ({0},{1})" -f $grabX, $grabY)
 
-$lparam = ((($grabY -band 0xFFFF) -shl 16) -bor ($grabX -band 0xFFFF))
-[void] [DmDrag.Win]::SetCursorPos($grabX, $grabY)
-Start-Sleep -Milliseconds 250
-if ($method -eq 'physical') {
-    [DmDrag.Win]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)   # LEFTDOWN
-} else {
-    [void] [DmDrag.Win]::PostMessageW($hwnd, 0x00A1, [IntPtr] 2, [IntPtr] ([long] $lparam))   # WM_NCLBUTTONDOWN, HTCAPTION
+Invoke-CaptionDrag $grabX $grabY
+
+# Did the move loop actually run? A drag that never engaged would report zero
+# drag frames and look like a measurement instead of a failure, so verify the
+# window actually moved and retry once before giving up.
+$dr = New-Object DmDrag.Win+RECT
+[void] [DmDrag.Win]::GetWindowRect($hwnd, [ref] $dr)
+if ($dr.Left -eq $originX -and $dr.Top -eq $originY) {
+    Write-Host 'the window never moved; raising it again and retrying the drag'
+    [DmDrag.Win]::SwitchToThisWindow($hwnd, $true)
+    Start-Sleep -Milliseconds 700
+    if (-not [DmDrag.Win]::GetWindowRect($hwnd, [ref] $rect)) { throw 'GetWindowRect failed' }
+    $retryY = Find-CaptionPoint $hwnd $rect $grabX
+    if ($null -eq $retryY) { throw 'the drag could not be started: our caption is still covered' }
+    Invoke-CaptionDrag $grabX $retryY
+    [void] [DmDrag.Win]::GetWindowRect($hwnd, [ref] $dr)
+    if ($dr.Left -eq $originX -and $dr.Top -eq $originY) {
+        throw 'the synthesized drag never engaged the modal move loop - the measurement is invalid'
+    }
 }
-Start-Sleep -Milliseconds 250
-
-for ($i = 1; $i -le $Steps; $i++) {
-    [void] [DmDrag.Win]::SetCursorPos(($grabX + $i * 12), ($grabY + $i * 4))
-    Start-Sleep -Milliseconds $StepDelayMs
-}
-
-[DmDrag.Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)   # LEFTUP
-Start-Sleep -Seconds 2
 
 Write-Host ''
 Write-Host 'frame cost by mode:'
