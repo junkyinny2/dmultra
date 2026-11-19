@@ -12,7 +12,7 @@ Resume order for a new conversation (do not ask the user to re-explain the proje
    history (it is the source of truth for what shipped; `PARITY_PLAN.md` checkboxes
    are stale for phases 2-8).
 
-Last checkpoint: 2026-11-19 10:26 - v0.075: extension observer attach + resolution labels + 2s overlay heartbeat; EXT_VERSION from CARGO_PKG_VERSION (D-014 closed); v0.074 committed, tagged and zipped [git 385cc3a master, dirty=8, VERSION 0.075]
+Last checkpoint: 2026-11-19 10:36 - post-release bookkeeping: publish and browser-integration reinstall recorded [git de04574 master, dirty=2, VERSION 0.075]
 Refresh: `.\checkpoint.ps1 save -Note "what just changed"`
 Briefing: `.\checkpoint.ps1 status`
 Self-check: `.\checkpoint.ps1 verify` (fails if a memory file is missing, thin or stale)
@@ -51,7 +51,8 @@ no plugins, no BitTorrent, no eD2K, no accounts, no API service. Two binaries:
 | Version strings | `Cargo.toml` 0.28.2 = `EXT_VERSION` (`env!("CARGO_PKG_VERSION")`) = generated and on-disk extension manifest 0.28.2. `VERSION` 0.075 is the release counter (title bar, About, tags) and is deliberately independent of the package version - see D-014. |
 | Git | On `master`, reached with `git checkout --ignore-other-worktrees master`: the branch was locked to the stale `C:/dmultra/unused` worktree, which is why HEAD was detached. Tags `v0.074` (`385cc3a`) and `v0.075`. `unused/` and `reference/` are ignored (D-019); the six `test-*.ps1` are tracked again. Remote `https://github.com/junkyinny2/dmultra.git`; other branch `tauri-gui` (abandoned non-egui GUI). |
 | Release zips | `C:\dmultra\unused\releases\dmultra-v0.074-20261119.zip` (105 entries incl. both v0.074 exes) and `dmultra-v0.075-20261119.zip`. |
-| Still open | Nothing from v0.041 to v0.075 is published: `origin/master` is at `9ed1e8a` (v0.040) and the remote has no tag past `v0.040`. |
+| Deployed browser integration | `C:\dmultra\browser-extension\` (`content.js` 15,325 B - the fixed version) plus `dmultra-chrome.zip/.crx` and `dmultra-firefox.xpi`, regenerated on 2026-11-19 by running `C:\dmultra\dmultra.exe browser`. That folder had been archived away by the folder cleanup; the extension has to be reloaded in the browser (chrome://extensions -> Reload) to pick up the new `content.js`. |
+| Published | Pushed 2026-11-19: `origin/master` moved `9ed1e8a -> de04574` and the 16 missing tags (`v0.041` .. `v0.075`) are on GitHub. Proof: `git --no-pager ls-remote --tags origin` lists `v0.075`. |
 
 ## 4. Architecture (25 modules, `src/`, line counts as of 2026-11-18)
 
@@ -118,10 +119,10 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
 
 ## 6. Open work (details and priority in `TASKS.md`)
 
-1. Nothing from v0.041 to v0.075 is published: `origin/master` is at `9ed1e8a` (v0.040)
-   and the remote has no tag past `v0.040`.
-2. The six GUI end-to-end scripts are tracked again but have not been run since the
+1. The six GUI end-to-end scripts are tracked again but have not been run since the
    folder cleanup.
+2. The browser extension has to be reloaded (chrome://extensions -> Reload) before the
+   v0.075 `content.js` is the one actually running in the browser.
 3. Docs drift: `README.md` still advertises RSS (there is no RSS code in `src/`) and
    `PARITY_PLAN.md` checkboxes lag far behind `PROGRESS.md`.
 4. 80 compiler warnings are the standing baseline.
@@ -148,15 +149,15 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
 
 ## 8. Exact next steps
 
-1. Publish: `cd C:\dmultra-base; git push origin master` then `git push origin --tags`.
-   `origin/master` is still at `9ed1e8a` (v0.040) and the remote has no tag past
-   `v0.040`, so nothing from v0.041-v0.075 is on GitHub. Proof:
-   `git --no-pager ls-remote --tags origin` lists `v0.075`.
-2. Run the six GUI end-to-end scripts (`test-minimized-progress.ps1`,
+1. Run the six GUI end-to-end scripts (`test-minimized-progress.ps1`,
    `test-minimized-capture.ps1`, `test-main-window-placement.ps1`,
    `test-minimize-modes.ps1`, `test-single-instance.ps1`, `test-startup-registry.ps1`).
    They are tracked again, they need the binaries deployed in `C:\dmultra`, and they are
    the only end-to-end GUI checks this project has.
+2. Reload the browser extension so the v0.075 `content.js` in
+   `C:\dmultra\browser-extension` is the running one, then confirm the "Download this
+   video" button disappears within ~6 s of pausing or hiding the video (that is the new
+   2 s heartbeat plus `STALE_AFTER`).
 3. Only then pick the next feature from `PARITY_PLAN.md` (the live list is `TASKS.md` P1).
 4. At every milestone run `.\checkpoint.ps1 save -Note "..."`, keep `TASKS.md` and
    `CHANGELOG.md` current, and `.\checkpoint.ps1 verify` must stay at exit 0.
@@ -175,6 +176,7 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
   work is mid-flight.
 
 <!-- CHECKPOINT:BEGIN -->
+- 2026-11-19 10:36 | git de04574 master dirty=2 | post-release bookkeeping: publish and browser-integration reinstall recorded
 - 2026-11-19 10:26 | git 385cc3a master dirty=8 | v0.075: extension observer attach + resolution labels + 2s overlay heartbeat; EXT_VERSION from CARGO_PKG_VERSION (D-014 closed); v0.074 committed, tagged and zipped
 - 2026-11-18 11:18 | git dff3be5 detached dirty=23 | memory system built: PROJECT_STATUS/TASKS/DECISIONS/CHANGELOG + checkpoint.ps1; git worktree pointer repaired
 - 2026-11-18 | git dff3be5 (detached, v0.073) | 18 paths dirty | persistent memory system created: PROJECT_STATUS.md, TASKS.md, DECISIONS.md, CHANGELOG.md, checkpoint.ps1; git worktree pointer repaired

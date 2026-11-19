@@ -38,6 +38,12 @@ per-version detail. Add new work under **Todo**, newest P0 first.
       verified inside the deployed exe), tag + zip.
 - [x] `unused/` and `reference/` git-ignored; the six GUI end-to-end `test-*.ps1` scripts
       restored to the repo root and tracked again (D-019).
+- [x] Published: `git push origin master` moved `9ed1e8a -> de04574` and the 16 tags that
+      were missing (`v0.041` .. `v0.075`) are now on GitHub. Proof run:
+      `git --no-pager ls-remote --tags origin` lists `v0.075`.
+- [x] Re-created `C:\dmultra\browser-extension` (the folder cleanup had archived it away) by
+      running `C:\dmultra\dmultra.exe browser`; the deployed `content.js` is 15,325 B -
+      byte-identical to the fixed repo copy - and the generated manifest is 0.28.2.
 
 ### Application work shipped (v0.029 -> v0.074)
 
@@ -75,17 +81,17 @@ per-version detail. Add new work under **Todo**, newest P0 first.
 
 ## Todo
 
-### P0 - publish what is already committed
+### P0 - verify the shipped fixes end-to-end
 
-- [ ] Push `master` and the tags: `cd C:\dmultra-base; git push origin master` then
-      `git push origin --tags`. `origin/master` is still at `9ed1e8a` (v0.040) and the
-      remote has no tag past `v0.040`, so nothing from v0.041-v0.075 is published.
-      Proof: `git --no-pager ls-remote --tags origin` lists `v0.075`.
 - [ ] Run the six GUI end-to-end scripts now that they are tracked again
       (`test-minimized-progress.ps1`, `test-minimized-capture.ps1`,
       `test-main-window-placement.ps1`, `test-minimize-modes.ps1`,
       `test-single-instance.ps1`, `test-startup-registry.ps1`); they need the binaries
       deployed in `C:\dmultra` and they are the only end-to-end GUI checks.
+- [ ] Reload the browser extension (chrome://extensions -> Reload) so the v0.075
+      `content.js` in `C:\dmultra\browser-extension` is the one actually running, then
+      confirm the "Download this video" button disappears within ~6 s of pausing or
+      hiding the video - that is the new 2 s heartbeat plus `STALE_AFTER`.
 
 ### P1 - remaining IDM parity gaps (from `PARITY_PLAN.md` phases 2-8; that file's
 checkboxes are stale, so this list is the live version)
