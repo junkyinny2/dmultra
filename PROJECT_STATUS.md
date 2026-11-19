@@ -12,7 +12,7 @@ Resume order for a new conversation (do not ask the user to re-explain the proje
    history (it is the source of truth for what shipped; `PARITY_PLAN.md` checkboxes
    are stale for phases 2-8).
 
-Last checkpoint: 2026-11-19 10:36 - post-release bookkeeping: publish and browser-integration reinstall recorded [git de04574 master, dirty=2, VERSION 0.075]
+Last checkpoint: 2026-11-19 10:44 - checkpoint.ps1 now resolves the derived extension version [git 0a3764a master, dirty=2, VERSION 0.075]
 Refresh: `.\checkpoint.ps1 save -Note "what just changed"`
 Briefing: `.\checkpoint.ps1 status`
 Self-check: `.\checkpoint.ps1 verify` (fails if a memory file is missing, thin or stale)
@@ -176,6 +176,7 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
   work is mid-flight.
 
 <!-- CHECKPOINT:BEGIN -->
+- 2026-11-19 10:44 | git 0a3764a master dirty=2 | checkpoint.ps1 now resolves the derived extension version
 - 2026-11-19 10:36 | git de04574 master dirty=2 | post-release bookkeeping: publish and browser-integration reinstall recorded
 - 2026-11-19 10:26 | git 385cc3a master dirty=8 | v0.075: extension observer attach + resolution labels + 2s overlay heartbeat; EXT_VERSION from CARGO_PKG_VERSION (D-014 closed); v0.074 committed, tagged and zipped
 - 2026-11-18 11:18 | git dff3be5 detached dirty=23 | memory system built: PROJECT_STATUS/TASKS/DECISIONS/CHANGELOG + checkpoint.ps1; git worktree pointer repaired

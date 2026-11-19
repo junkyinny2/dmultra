@@ -103,7 +103,8 @@ function Get-Versions {
             Select-Object -First 1
         if ($m) { $ext = $m.Matches[0].Groups[1].Value }
     }
-    [pscustomobject]@{ File = $file; Cargo = $cargo; Ext = $ext }
+    if ($ext -eq 'CARGO_PKG_VERSION') { $ext = $cargo }   # env!() => follows Cargo.toml
+    [pscustomobject]@{ File = $file; Cargo = $cargo; Ext = $ext; ExtDerived = ($ext -eq $cargo) }
 }
 
 function Get-NewestSourceWrite {
@@ -128,11 +129,12 @@ function Invoke-Status {
     $v = Get-Versions
     $g = Get-GitInfo
     Write-Host 'DM Ultra - checkpoint briefing'
-    Write-Host ("  version (VERSION)  : {0}" -f $v.File)
+    Write-Host ("  version (VERSION)  : {0}  (release counter: title bar + vX.YYY tags)" -f $v.File)
     Write-Host ("  version (Cargo)    : {0}" -f $v.Cargo)
-    Write-Host ("  version (extension): {0}" -f $v.Ext)
-    if (($v.File -ne $v.Cargo) -or ($v.Cargo -ne $v.Ext)) {
-        Write-Host '  NOTE  these three must agree - see DECISIONS.md D-014'
+    $extNote = if ($v.ExtDerived) { '(follows CARGO_PKG_VERSION)' } else { '(HARDCODED - should follow the package)' }
+    Write-Host ("  version (extension): {0}  {1}" -f $v.Ext, $extNote)
+    if (($v.Cargo -ne 'n/a') -and ($v.Ext -ne 'n/a') -and ($v.Cargo -ne $v.Ext)) {
+        Write-Host '  FAIL  extension version != package version - see DECISIONS.md D-014'
     }
     Write-Host ("  git                : {0} ({1}) dirty={2} newestTag={3}" -f $g.Head, $g.Ref, $g.Dirty, $g.Tag)
 

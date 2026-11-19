@@ -44,6 +44,12 @@ per-version detail. Add new work under **Todo**, newest P0 first.
 - [x] Re-created `C:\dmultra\browser-extension` (the folder cleanup had archived it away) by
       running `C:\dmultra\dmultra.exe browser`; the deployed `content.js` is 15,325 B -
       byte-identical to the fixed repo copy - and the generated manifest is 0.28.2.
+- [x] `checkpoint.ps1` understands the derived version: `status` resolves
+      `EXT_VERSION = env!("CARGO_PKG_VERSION")` to the package version and only complains
+      when the two really differ (it used to print the literal macro name and claim the
+      three versions disagreed). Proof run: `.\checkpoint.ps1 status` prints
+      `version (extension): 0.28.2 (follows CARGO_PKG_VERSION)` and `.\checkpoint.ps1 verify`
+      exits 0.
 
 ### Application work shipped (v0.029 -> v0.074)
 
