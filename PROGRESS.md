@@ -349,3 +349,73 @@
   `node --test` 9/9, `checkpoint.ps1 verify` exit 0. Release build 0 errors;
   `dmultra.exe` 16,652,288 B and `dmultra-nmh.exe` 519,680 B built 2026-11-19 14:41
   and copied to `C:\dmultra`; file version 0.28.2.0 (package version, D-014).
+
+## v0.077 (released 2026-11-19)
+- Fixed the reported bug: **clicking the taskbar button of a hidden main window did
+  nothing**. The hidden state is a park (D-007): off-screen at `(-32000,-32000)` but still
+  `WS_VISIBLE` and non-iconic, which is what keeps eframe painting the progress popouts and
+  what keeps the taskbar button in "taskbar and tray" mode. Because the window is still
+  visible the shell believes it is open, so its button click arrives as
+  `WM_SYSCOMMAND / SC_MINIMIZE` and never as `SC_RESTORE`; the hook intercepted that as a
+  minimize and parked the window again. (D-023.)
+- Measured before touching code. `unused\probe-taskbar-click.ps1` and
+  `unused\probe-uia-taskbar.ps1` drive the shell's own taskbar button through UIA instead of
+  guessing at the message. Before the fix the log after a click contained only
+  `main window parked` and the window stayed at `(-32000,-32000)`. After it the same click
+  logged `syscommand 0xF020 parked=true` -> `syscommand while parked; restoring the main
+  window` -> `main window restored from the park position`, and the window moved to
+  `(589,231)`; the next click parked it again. Both halves are a toggle, as the user expects.
+- `src/browser.rs`: new `RESTORE_REQUESTED` flag, `wakeup::take_restore_request()` and
+  `wakeup::restore_from_park(hwnd, why)`, which unparks, records the request and posts the
+  synthetic resize - a parked window otherwise only gets the slow idle pulse from
+  `spawn_busy_waker`, so without the wake the GUI would not notice for up to half a second
+  and would park it again. `WM_SYSCOMMAND` now treats `SC_MINIMIZE` **or** `SC_RESTORE`
+  while parked as "show it", and the `WM_ACTIVATE` branch no longer tests `PARKED` before
+  entering so an Alt+Tab or tray activation of a parked window reaches the same code.
+  Public wrapper `browser::main_window_restore_requested()`; `debug_log` also reports
+  `syscommand {cmd} parked={bool}` (only when `DMULTRA_DEBUG` is set).
+- `src/gui.rs`: `DmApp::update` folds that request into its existing `show_requested` path,
+  so `show_main_window` is cleared in the same frame - otherwise the "a hidden window must
+  really be hidden" safety net parks it straight again, which was the other half of the bug -
+  and the restore log line now says "tray, taskbar or second-instance request".
+- `test-minimize-modes.ps1` gained the two checks this bug needs: after parking in
+  "taskbar and tray" mode it posts the exact message the shell sends (`SC_MINIMIZE`) and
+  requires the window to come back on screen, then requires the next click to park it again.
+  Against the deployed 0.077: 16 PASS / 0 FAIL, exit 0.
+- Two test scripts turned out to be wrong rather than the app - the same class of stale
+  assertion the v0.076 pass fixed, in the two scripts that pass was missed:
+  - `test-single-instance.ps1` asserted that a `--background` launch leaves the main window
+    `NOT WS_VISIBLE`, which is the pre-v0.073 hide semantics. `unused\probe-bg.ps1` samples
+    the real window state over 10 s and was run against both the deployed 0.077 and the saved
+    `C:\dmultra\unused\dmultra-v0076.exe`: both settle into the identical
+    `visible=True iconic=False toolwindow=True at=(-32000,-32000)`, and in both the
+    not-visible state exists only for 230-350 ms after the window is created (eframe's
+    anti-flash). So the old check passed only when its 150 ms poll happened to land in that
+    transient - it had nothing to do with the new binary. It now requires the out-of-sight
+    state to *hold*, waits for a genuine on-screen reveal (a parked window is also
+    `WS_VISIBLE`, so "visible" alone proves nothing) and waits for the second process to
+    exit instead of sampling it once: 4 PASS / 0 FAIL, exit 0, twice in a row.
+  - `test-window-drag-profile.ps1` could not run at all while a maximized application held
+    the foreground (VS Code covers the whole work area on this machine): `SetForegroundWindow`
+    and `SwitchToThisWindow` are both legitimately refused there, and the harness threw
+    "our window will not come to the top of the Z-order". It now escalates a third time into
+    the topmost band (`HWND_TOPMOST` with `SWP_NOMOVE|NOSIZE|NOACTIVATE`) and leaves it again
+    (`HWND_NOTOPMOST`) before anything is reported, so it changes nothing permanently.
+- Re-measured on the deployed 0.077 (D-021 had to stay intact): `test-window-drag-profile.ps1`
+  drag 259 frames median 0.1 ms (max 1.4 ms), idle median 0.7 ms;
+  `checkpoint.ps1 test -StopApp` reported 1458 idle frames median 0.3 ms and 673 drag frames
+  median 0.1 ms.
+- Green: `build.ps1 check` 0 errors / 80 warnings (baseline),
+  `checkpoint.ps1 test -StopApp` exit 0 (29 rust tests, 9 extension tests, drag frame cost),
+  and all seven GUI end-to-end scripts against the deployed 0.077: placement 7/7,
+  startup-registry 6/6, single-instance 4/4, minimize-modes 16/16, minimized-progress 6/6,
+  minimized-capture exit 0, drag profile exit 0.
+- Release build 0 errors; `dmultra.exe` 15,649,280 B and `dmultra-nmh.exe` 506,880 B built
+  2026-11-19 19:05-19:07 and copied to `C:\dmultra`. Both keep the
+  `ALL APPLICATION PACKAGES` read-and-execute grant the AppContainer native-messaging host
+  needs (D-018) - re-checked on both files and the folder after the copy. The title bar now
+  reads "DM Ultra v0.077", proved by the drag harness locating the window by that exact
+  title. The 19:07 exe is ~1 MB smaller than the 18:50 one built from the same source; the
+  likely reason is fat LTO spanning the whole crate graph on the full rebuild that the
+  `include_str!("../VERSION")` bump forced, rather than an incremental relink - an
+  inference, not a measurement, and no behaviour difference was seen.

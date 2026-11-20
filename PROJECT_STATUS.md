@@ -49,15 +49,15 @@ no plugins, no BitTorrent, no eD2K, no accounts, no API service. Two binaries:
 | `.\build.ps1 check` | `Finished`, 0 errors, 80 warnings (the accepted baseline). |
 | `.\build.ps1 test` | **29 passed, 0 failed** - re-run 2026-11-19 after the v0.076 change. |
 | `node --test browser-extension/background.test.js browser-extension/content.test.js` | **9 pass, 0 fail**. |
-| Frame cost by mode (`test-window-drag-profile.ps1`, v0.076) | idle median 0.7 ms, live median 0.8 ms, dragging 0.2 ms plain and 0.6 ms with a progress window open. The same script on v0.075 measured 200.6 ms idle, 402.2 ms live and 200-403 ms while dragging (3-5 frames per drag instead of 40). |
-| GUI end-to-end scripts (v0.076) | placement 7/7, startup-registry 6/6, single-instance 4/4, minimize-modes 13/13, minimized-progress 6/6, minimized-capture exit 0 - all re-measured 2026-11-19 after the three scripts were rewritten to assert the D-007 park contract (out of sight + taskbar button) instead of `IsIconic`. Each must run in a fresh shell (`Add-Type` collides in a reused one). |
-| `.\checkpoint.ps1 test -StopApp` (v0.076) | exit 0 in 14 s: `rust unit tests 29 passed, 0 failed`, `extension tests 9 of 9 pass, 0 fail`, `gui frame cost 34 idle frames median 0.6 ms, 40 drag frames median 0.1 ms`. `-SkipGui` runs the same two non-desktop suites in 3 s. Measured 2026-11-19. |
-| Release binaries | `target\release\dmultra.exe` 16,652,288 B and `dmultra-nmh.exe` 519,680 B, built 2026-11-19 14:41 and copied to `C:\dmultra`. File/ProductVersion 0.28.2.0. The previous binary is kept at `C:\dmultra\unused\dmultra-baseline-v0075.exe` for A/B measurement. |
-| Version strings | `Cargo.toml` 0.28.2 = `EXT_VERSION` (`env!("CARGO_PKG_VERSION")`) = generated and on-disk extension manifest 0.28.2. `VERSION` 0.076 is the release counter (title bar, About, tags) and is deliberately independent of the package version - see D-014. |
-| Git | On `master`, reached with `git checkout --ignore-other-worktrees master`: the branch was locked to the stale `C:/dmultra/unused` worktree, which is why HEAD was detached. Tags `v0.074` (`385cc3a`), `v0.075`, `v0.076`. `unused/` and `reference/` are ignored (D-019); the seven `test-*.ps1` scripts are tracked. Remote `https://github.com/junkyinny2/dmultra.git`; other branch `tauri-gui` (abandoned non-egui GUI). |
-| Release zips | `C:\dmultra\unused\releases\dmultra-v0.074-20261119.zip`, `dmultra-v0.075-20261119.zip` and `dmultra-v0.076-20261119.zip` - each the source tree plus both exes under a `dmultra-vX.YYY/` folder (the v0.074 zip has 105 entries). |
+| Frame cost by mode (`test-window-drag-profile.ps1`, v0.077) | 259 drag frames median 0.1 ms (max 1.4 ms), idle median 0.7 ms, exit 0 - measured with VS Code maximized over the desktop, which the harness now handles by escalating to the topmost band (7.23). v0.076 was 0.2 ms plain / 0.6 ms with a popout; v0.075 measured 200.6 ms idle, 402.2 ms live and 200-403 ms while dragging. |
+| GUI end-to-end scripts (v0.077) | placement 7/7, startup-registry 6/6, single-instance 4/4 (twice in a row), minimize-modes 16/16 - including the two new taskbar-button checks - minimized-progress 6/6, minimized-capture exit 0; all re-measured 2026-11-19 against the deployed 0.077. Each runs in a fresh shell (`Add-Type` collides in a reused one) and needs the previous instance stopped **first**, because several scripts leave one running. |
+| `.\checkpoint.ps1 test -StopApp` (v0.077) | exit 0 in 17 s: `rust unit tests 29 passed, 0 failed`, `extension tests 9 of 9 pass, 0 fail`, `gui frame cost 1458 idle frames median 0.3 ms, 673 drag frames median 0.1 ms`. `-SkipGui` runs the same two non-desktop suites in 3 s. Measured 2026-11-19. |
+| Release binaries | `C:\dmultra\dmultra.exe` 15,649,280 B and `C:\dmultra\dmultra-nmh.exe` 506,880 B, built 2026-11-19 19:05-19:07 from `VERSION` 0.077. The title bar reads "DM Ultra v0.077" - proved by the drag harness finding the window by that exact title. File/ProductVersion 0.28.2.0 (package version, D-014). Both files and the folder still carry the `ALL APPLICATION PACKAGES` read-and-execute grant (D-018) - re-checked after the copy. Older binaries kept for A/B: `C:\dmultra\unused\dmultra-baseline-v0075.exe`, `C:\dmultra\unused\dmultra-v0076.exe`. |
+| Version strings | `Cargo.toml` 0.28.2 = `EXT_VERSION` (`env!("CARGO_PKG_VERSION")`) = generated and on-disk extension manifest 0.28.2. `VERSION` 0.077 is the release counter (title bar, About, tags) and is deliberately independent of the package version - see D-014. |
+| Git | On `master`, reached with `git checkout --ignore-other-worktrees master`: the branch was locked to the stale `C:/dmultra/unused` worktree, which is why HEAD was detached. Tags `v0.074` (`385cc3a`), `v0.075`, `v0.076`, `v0.077`. `unused/` and `reference/` are ignored (D-019); the seven `test-*.ps1` scripts are tracked. Remote `https://github.com/junkyinny2/dmultra.git`; other branch `tauri-gui` (abandoned non-egui GUI). |
+| Release zips | `C:\dmultra\unused\releases\dmultra-v0.074-20261119.zip`, `dmultra-v0.075-20261119.zip`, `dmultra-v0.076-20261119.zip` and `dmultra-v0.077-20261119.zip` - each the source tree plus both exes under a `dmultra-vX.YYY/` folder (the v0.074 zip has 105 entries). |
 | Deployed browser integration | `C:\dmultra\browser-extension\` (`content.js` 15,325 B - the fixed version) plus `dmultra-chrome.zip/.crx` and `dmultra-firefox.xpi`, regenerated on 2026-11-19 by running `C:\dmultra\dmultra.exe browser`. That folder had been archived away by the folder cleanup; the extension has to be reloaded in the browser (chrome://extensions -> Reload) to pick up the new `content.js`. |
-| Published | Pushed 2026-11-19: `origin/master` moved `9ed1e8a -> de04574` and the 16 missing tags (`v0.041` .. `v0.075`) are on GitHub; the v0.076 commit and tag are pushed with it. Proof: `git --no-pager ls-remote --tags origin` lists `v0.076`. |
+| Published | Pushed 2026-11-19: `origin/master` is at the v0.077 commit and every tag through `v0.077` is on GitHub (earlier pushes carried `v0.041` .. `v0.076`). Proof: `git --no-pager ls-remote --tags origin` lists `v0.077`. |
 
 ## 4. Architecture (25 modules, `src/`, line counts as of 2026-11-18)
 
@@ -156,6 +156,9 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
 | 7.18 | `test-single-instance.ps1` could not start: "cannot find C:\dmultra-base\dmultra.exe" | The script still pointed at the repo root, a pre-cleanup layout; the repo tree holds no binaries | Point it at the deployed `C:\dmultra\dmultra.exe` (v0.076) - 4/4 PASS after the change |
 | 7.19 | `test-minimize-modes.ps1` failed 3 checks, `test-minimized-progress.ps1` 2, `test-minimized-capture.ps1` threw at its minimize step | The scripts asserted `IsIconic`. Since v0.073 (D-007) the tray modes park the window at (-32000,-32000) while keeping it `WS_VISIBLE` (and "tray only" adds `WS_EX_TOOLWINDOW`), so it is never iconic - the app was right, the assertion was stale | Assert "out of sight" (iconic OR hidden OR off-screen) plus the presence of the taskbar button: `IsOutOfSight` / `HasTaskbarButton` in each script. All three now exit 0 |
 | 7.20 | After the fix, the "taskbar" check failed on one run and passed on the next with the same binary | Not a flake: `gui.rs:2348` parks the window in *any* mode while a popout is open, and a leftover download in `state.json` had its 'Download status' window open at startup on the first run | The script now counts the app's own titled top-level windows before minimizing and expects a real iconic minimize only when that count is 0 (`unused\probe-taskbar.ps1` proved it) |
+| 7.21 | Clicking the taskbar icon of a hidden (parked) main window did nothing | A parked window stays `WS_VISIBLE` and non-iconic - that is what keeps its taskbar button and keeps eframe painting the popouts - so the shell believes it is open and its button click sends `SC_MINIMIZE`, never `SC_RESTORE`; the hook intercepted that as a minimize and parked it again, and even a hook restore was undone by the GUI's own "a hidden window must really be hidden" safety net on the next frame | While parked, `SC_MINIMIZE` **or** `SC_RESTORE` (and any `WM_ACTIVATE`) means "show it": `wakeup::restore_from_park` unparks, sets `RESTORE_REQUESTED` and posts the synthetic resize, and `DmApp::update` consumes `browser::main_window_restore_requested()` in the same frame (v0.077, D-023). Proved through the shell's own UIA taskbar button and asserted by two new checks in `test-minimize-modes.ps1` |
+| 7.22 | `test-single-instance.ps1` failed its first check on v0.077 after passing 4/4 on v0.076 | Not an app change. The script asserted `NOT IsWindowVisible` for a `--background` launch - the pre-v0.073 hide semantics - while a background launch parks as `visible=True at=(-32000,-32000)`. `unused\probe-bg.ps1` run against the deployed 0.077 **and** the saved `C:\dmultra\unused\dmultra-v0076.exe` gives both binaries the identical settled state, and the not-visible state exists only 230-350 ms after the window is created (eframe's anti-flash), so the old check passed only when its 150 ms poll happened to land in that transient | Assert the state *settled* (out of sight and holding) instead of one sample; wait for a genuine on-screen reveal, because a parked window is also `WS_VISIBLE`; and wait for the second process to exit instead of sampling it once. 4/4 exit 0, twice in a row |
+| 7.23 | `test-window-drag-profile.ps1` threw "our window will not come to the top of the Z-order at its caption" and took `checkpoint.ps1 test` red with it | Not an app bug: VS Code was maximized and owned the caption - `WindowFromPoint` returned its hwnd while our own `WM_NCHITTEST` on the same point answered HTCAPTION - and a process that did not start in the foreground may legitimately be refused, so both `SetForegroundWindow` and `SwitchToThisWindow` failed | The harness escalates a third time: `HWND_TOPMOST` with `SWP_NOMOVE\|NOSIZE\|NOACTIVATE` for the duration of the drag, then `HWND_NOTOPMOST` before anything is reported, so no lasting change is left. Measured 259 drag frames at 0.1 ms median with VS Code still maximized |
 
 ## 8. Exact next steps
 
@@ -169,14 +172,23 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
 3. Measure, never eyeball, any change to frame production:
    `pwsh -NoProfile -File .\test-window-drag-profile.ps1` (add `-ChildUrl <url>` to drag
    with a progress window open), or `.\checkpoint.ps1 test -StopApp` for the whole tree at
-   once. v0.076 must stay at <= 1 ms per dragging frame (D-021) - it measured 0.1 ms on
+   once. v0.077 must stay at <= 1 ms per dragging frame (D-021) - it measured 0.1 ms on
    2026-11-19.
-4. At every milestone run `.\checkpoint.ps1 save -Note "..."`, keep `TASKS.md` and
+4. When a GUI script or harness disagrees with the app, prove which of the two is wrong
+   before touching code. Four failures in a row were the harness, not the app: 7.19, 7.20,
+   7.22 (stale pre-D-007 assertions) and 7.23 (the desktop, not the binary). The template
+   is an A/B probe against a saved binary - e.g.
+   `pwsh -NoProfile -File unused\probe-bg.ps1 -Exe C:\dmultra\unused\dmultra-v0076.exe` -
+   and a probe that drives the real thing (the shell's own UIA taskbar button in
+   `unused\probe-uia-taskbar.ps1`) beats a synthesized message.
+5. At every milestone run `.\checkpoint.ps1 save -Note "..."`, keep `TASKS.md` and
    `CHANGELOG.md` current, and `.\checkpoint.ps1 verify` must stay at exit 0.
 
-Done since the previous checkpoint: items 2 and 3 of the old list - the three
-end-to-end scripts now assert the D-007 park contract (all exit 0) and
-`checkpoint.ps1` has its `test` mode. Proof commands are in `TASKS.md`.
+Done since the previous checkpoint: v0.077 shipped - the taskbar button of a parked main
+window now shows it instead of re-parking it (D-023), `test-single-instance.ps1` and
+`test-window-drag-profile.ps1` were corrected after being proven wrong rather than the app,
+and the whole tree was re-measured against the deployed 0.077, tagged and zipped. Proof
+commands are in `TASKS.md`.
 
 ## 9. Standing rules that override convenience
 

@@ -60,6 +60,44 @@ per-version detail. Add new work under **Todo**, newest P0 first.
 - [x] No app code changed, so `VERSION` stays 0.076 and no tag or zip is due
       (D-015). `.\checkpoint.ps1 verify` still exits 0.
 
+### v0.077 - the taskbar button of a parked window (done 2026-11-19)
+
+- [x] Found the real cause of "clicking the taskbar icon does nothing": a parked window is
+      still `WS_VISIBLE` and non-iconic (that is what keeps its taskbar button and keeps
+      eframe painting the popouts), so the shell believes it is open and its click arrives as
+      `SC_MINIMIZE`, not `SC_RESTORE` - which the hook intercepted as a minimize and parked
+      again. Proof before the change: `unused\probe-uia-taskbar.ps1` invoking the shell's own
+      UIA taskbar button left the window at `(-32000,-32000)` with only a `main window parked`
+      log line (`unused\fix-winlines.txt`).
+- [x] `src/browser.rs` + `src/gui.rs` fix: treat either syscommand (and any activation) while
+      parked as "show it", restore it, wake the GUI in the same frame so its safety net stops
+      re-parking it. Proof after the change: the same UIA click moved the window to
+      `(589,231)` and the next click parked it again (`unused\probe-uia-after2-sum.txt`), and
+      `test-minimize-modes.ps1` -> 16 PASS / 0 FAIL, exit 0 against the deployed 0.077,
+      including its two new checks (`taskbar click shows the parked window`,
+      `clicking the icon again parks it again`). Recorded as D-023.
+- [x] Proved `test-single-instance.ps1` was wrong and not the app: `unused\probe-bg.ps1`
+      samples the window state over 10 s against both the deployed 0.077 and the saved
+      `C:\dmultra\unused\dmultra-v0076.exe`, and both binaries settle into the identical
+      `visible=True iconic=False toolwindow=True at=(-32000,-32000)`; the not-visible state
+      lasts only 230-350 ms after the window is created, so the old `NOT IsWindowVisible`
+      check passed only by racing that transient. The script now asserts the D-007 contract
+      (settled out-of-sight, genuine on-screen reveal, one process left, request consumed):
+      4 PASS / 0 FAIL exit 0, run twice in a row. Proof:
+      `pwsh -NoProfile -File .\test-single-instance.ps1`.
+- [x] `test-window-drag-profile.ps1` now runs even when a maximized app owns the foreground
+      (VS Code covers the work area here and both `SetForegroundWindow` and
+      `SwitchToThisWindow` are refused): it escalates into the topmost band and leaves it
+      again before reporting. Proof: it measured 259 drag frames at 0.1 ms median with VS
+      Code maximized, exit 0, where the run before the change threw "our window will not come
+      to the top of the Z-order".
+- [x] Re-measured everything against the deployed 0.077: `.\build.ps1 check` 0 errors /
+      80 warnings, `.\checkpoint.ps1 test -StopApp` exit 0 (29 rust, 9 extension, drag median
+      0.1 ms), placement 7/7, startup-registry 6/6, single-instance 4/4, minimize-modes 16/16,
+      minimized-progress 6/6, minimized-capture exit 0. Release build 0 errors, both exes
+      deployed with their `ALL APPLICATION PACKAGES` grant verified afterwards (D-018),
+      `VERSION` 0.077, tag `v0.077` and the release zip.
+
 ### P0 - tree green, v0.074 and v0.075 landed - done 2026-11-19
 
 - [x] Version drift killed and made permanent: `EXT_VERSION = env!("CARGO_PKG_VERSION")`
@@ -216,9 +254,9 @@ checkboxes are stale, so this list is the live version)
 | Extension tests | `cd C:\dmultra-base; node --test browser-extension/background.test.js browser-extension/content.test.js` | 9 pass, 0 fail (measured 2026-11-19) |
 | Release build | `cd C:\dmultra-base; .\build.ps1 build --release` | ok (kill any running dmultra first) |
 | Memory files | `cd C:\dmultra-base; .\checkpoint.ps1 verify` | must exit 0 |
-| Everything at once | `cd C:\dmultra-base; .\checkpoint.ps1 test -StopApp` | exit 0 in 14 s (measured 2026-11-19): rust 29/29, extension 9/9, drag median 0.1 ms. `-SkipGui` drops the cursor-dependent harness and finishes in 3 s |
-| GUI end-to-end | `pwsh -NoProfile -File .\test-<name>.ps1` (fresh process each: `Add-Type` collides in a reused shell) | measured 2026-11-19 on v0.076 after the D-007 fix: placement 7/7, startup-registry 6/6, single-instance 4/4, minimize-modes 13/13, minimized-progress 6/6, minimized-capture exit 0 |
-| Frame cost by mode | `pwsh -NoProfile -File .\test-window-drag-profile.ps1` (add `-ChildUrl <url>` to drag with a progress window open) | v0.076: drag 0.2 ms plain / 0.6 ms with a popout, idle median 0.7 ms, live median 0.8 ms. v0.075 measured 200.5 / 402.7 / 200.6 / 402.2 ms |
+| Everything at once | `cd C:\dmultra-base; .\checkpoint.ps1 test -StopApp` | exit 0 in 17 s (measured 2026-11-19 on the deployed v0.077): rust 29/29, extension 9/9, 1458 idle frames median 0.3 ms, 673 drag frames median 0.1 ms. `-SkipGui` drops the cursor-dependent harness and finishes in 3 s |
+| GUI end-to-end | `pwsh -NoProfile -File .\test-<name>.ps1` (fresh process each: `Add-Type` collides in a reused shell), and stop the running instance before **each** script - they start their own and several leave one running | measured 2026-11-19 on the deployed v0.077: placement 7/7, startup-registry 6/6, single-instance 4/4 (twice in a row), minimize-modes 16/16, minimized-progress 6/6, minimized-capture exit 0 |
+| Frame cost by mode | `pwsh -NoProfile -File .\test-window-drag-profile.ps1` (add `-ChildUrl <url>` to drag with a progress window open) | v0.077: 259 drag frames median 0.1 ms (max 1.4), idle median 0.7 ms - and it now works with a maximized app on the foreground because it escalates to the topmost band. v0.076: drag 0.2 ms plain / 0.6 ms with a popout, idle median 0.7 ms, live median 0.8 ms. v0.075 measured 200.5 / 402.7 / 200.6 / 402.2 ms |
 
 Deploy after a release build: copy `target\release\dmultra.exe` AND
 `target\release\dmultra-nmh.exe` to `C:\dmultra` (Defender exclusion lives there).
