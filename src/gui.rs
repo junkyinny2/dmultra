@@ -2302,13 +2302,20 @@ impl eframe::App for DmApp {
             std::sync::atomic::Ordering::Relaxed,
         );
 
-        // Showing from the tray (left/double click or the menu item), or
-        // when a second launch asks this instance to surface.
+        // Showing from the tray (left/double click or the menu item), when a
+        // second launch asks this instance to surface, or when the Win32 hook
+        // already brought the window back after a taskbar-button click.
         let mut show_requested = self
             .show_flag
             .lock()
             .map(|mut flag| std::mem::take(&mut *flag))
             .unwrap_or(false);
+        // The hook restored the window itself; this frame has to stop treating
+        // it as hidden, otherwise the safety net below parks it again and the
+        // user sees nothing happen when they click the taskbar button.
+        if !show_requested && crate::browser::main_window_restore_requested() {
+            show_requested = true;
+        }
         if !show_requested && !dragging && self.last_show_poll.elapsed() > Duration::from_millis(300) {
             self.last_show_poll = Instant::now();
             let path = show_request_path();
@@ -2324,7 +2331,10 @@ impl eframe::App for DmApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             // Undo the raw Win32 hide (eframe already believes it is visible).
             crate::browser::show_main_window();
-            crate::logfile::log("TRAY", "main window restored from the tray");
+            crate::logfile::log(
+                "TRAY",
+                "main window restored (tray, taskbar or second-instance request)",
+            );
         }
 
         // Close button: hide to the tray when one exists, otherwise quit.

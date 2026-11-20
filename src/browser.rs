@@ -941,6 +941,21 @@ pub fn main_window_parked() -> bool {
     false
 }
 
+/// True once the user has asked for a parked main window to be shown again -
+/// a taskbar-button click, Alt+Tab or any activation. The hook has already
+/// moved the window back on screen; the GUI must clear its own "hidden" state
+/// in the same frame or its safety net parks the window again. Clears the
+/// request when it reports it.
+#[cfg(windows)]
+pub fn main_window_restore_requested() -> bool {
+    wakeup::take_restore_request()
+}
+
+#[cfg(not(windows))]
+pub fn main_window_restore_requested() -> bool {
+    false
+}
+
 /// True while the user is dragging or resizing one of our windows with the
 /// mouse (the main window or any popout).
 ///
@@ -1071,6 +1086,10 @@ mod wakeup {
     static PARKED: AtomicBool = AtomicBool::new(false);
     /// We added `WS_EX_TOOLWINDOW` ourselves and must remove it on restore.
     static PARK_TOOL_ADDED: AtomicBool = AtomicBool::new(false);
+    /// The user asked for a parked window to come back (taskbar button,
+    /// Alt+Tab, any activation). The GUI must clear its "hidden" state on the
+    /// next frame, otherwise its own safety net parks the window again.
+    static RESTORE_REQUESTED: AtomicBool = AtomicBool::new(false);
     /// `0` = taskbar, `1` = taskbar+tray, `2` = tray only.
     static MAIN_MODE: AtomicU8 = AtomicU8::new(1);
     /// A progress/dialog child window is open right now.
@@ -1344,6 +1363,24 @@ mod wakeup {
         DRAGGING.load(Ordering::Relaxed)
     }
 
+    /// Consume a pending "the user wants the window back" request.
+    pub(super) fn take_restore_request() -> bool {
+        RESTORE_REQUESTED.swap(false, Ordering::Relaxed)
+    }
+
+    /// Bring a parked main window back on screen because the user asked for it,
+    /// and remember that the GUI must stop hiding it.
+    ///
+    /// `post_resize` matters here: a parked window only receives the slow idle
+    /// pulse from `spawn_busy_waker`, so without it the GUI would not notice the
+    /// request for up to half a second and would park the window again.
+    fn restore_from_park(hwnd: isize, why: &str) {
+        debug_log(&format!("{why}; restoring the main window"));
+        unpark();
+        RESTORE_REQUESTED.store(true, Ordering::Relaxed);
+        post_resize(hwnd);
+    }
+
     /// Restore+park a genuinely iconic main window (a popout was opened
     /// while it was minimized to the taskbar).
     pub(super) fn wake_for_popouts() {
@@ -1406,6 +1443,19 @@ mod wakeup {
 
         if msg == WM_SYSCOMMAND {
             let cmd = wparam & 0xFFF0;
+            let parked = PARKED.load(Ordering::Relaxed);
+            debug_log(&format!("syscommand {cmd:#X} parked={parked}"));
+            // A parked window is still `WS_VISIBLE` and non-iconic - that is
+            // what keeps its taskbar button and keeps eframe painting the
+            // popouts - so the shell believes it is open and its button click
+            // arrives as SC_MINIMIZE, not SC_RESTORE. The user means the exact
+            // opposite: bring the window back. Treat either command while
+            // parked as that request; before this the click was swallowed and
+            // the window stayed off-screen.
+            if parked && (cmd == SC_MINIMIZE || cmd == SC_RESTORE) {
+                restore_from_park(hwnd, "syscommand while parked");
+                return 0;
+            }
             if cmd == SC_MINIMIZE {
                 let mode = MAIN_MODE.load(Ordering::Relaxed);
                 let child = POPOUT_OPEN.load(Ordering::Relaxed);
@@ -1416,17 +1466,13 @@ mod wakeup {
                     park(mode == 2);
                     return 0;
                 }
-            } else if cmd == SC_RESTORE && PARKED.load(Ordering::Relaxed) {
-                unpark();
+            }
+        } else if msg == WM_ACTIVATE && (wparam & 0xFFFF) != 0 {
+            // Taskbar button click, Alt+Tab, tray restore.
+            if PARKED.load(Ordering::Relaxed) {
+                restore_from_park(hwnd, "activated while parked");
                 return 0;
             }
-        } else if msg == WM_ACTIVATE
-            && PARKED.load(Ordering::Relaxed)
-            && (wparam & 0xFFFF) != 0
-        {
-            // Taskbar button click, Alt+Tab, tray restore.
-            unpark();
-            return 0;
         } else if msg == WM_ENTERSIZEMOVE {
             DRAGGING.store(true, Ordering::Relaxed);
         } else if msg == WM_EXITSIZEMOVE || msg == WM_CAPTURECHANGED {

@@ -175,6 +175,29 @@ function Log-Text {
     return Get-Content $logPath -Raw -ErrorAction SilentlyContinue
 }
 
+function Wait-WindowShown($hwnd) {
+    for ($i = 0; $i -lt 25; $i++) {
+        Start-Sleep -Milliseconds 100
+        if (-not [MinMode]::IsOutOfSight($hwnd)) { return $true }
+    }
+    return $false
+}
+
+function Wait-WindowHidden($hwnd) {
+    for ($i = 0; $i -lt 25; $i++) {
+        Start-Sleep -Milliseconds 100
+        if ([MinMode]::IsOutOfSight($hwnd)) { return $true }
+    }
+    return $false
+}
+
+# The message the shell sends when its taskbar button is clicked for a window
+# it believes is open (WM_SYSCOMMAND / SC_MINIMIZE). A parked window is exactly
+# that: still WS_VISIBLE and non-iconic, so this is what a real click produces.
+function Invoke-TaskbarClick($hwnd) {
+    [MinMode]::PostMessageW($hwnd, 0x0112, [IntPtr]0xF020, [IntPtr]::Zero) | Out-Null
+}
+
 $results = @()
 $current = $null
 
@@ -224,6 +247,18 @@ try {
         ([MinMode]::HasTaskbarButton($h) -and [MinMode]::IsOutOfSight($h)) ([MinMode]::Describe($h))
     $results += Show-Check 'taskbar+tray: tray icon present' `
         ((Log-Text) -match 'tray icon created' -and (Log-Text) -notmatch 'tray icon unavailable') ''
+
+    # The reported bug: clicking the taskbar icon of the parked window did
+    # nothing. A parked window is still WS_VISIBLE and non-iconic, so the shell
+    # sends SC_MINIMIZE (its idea of minimizing an open window) rather than
+    # SC_RESTORE, and the hook used to intercept that and park it again. The
+    # click must show the window, and the next click must hide it again.
+    Invoke-TaskbarClick $h
+    $results += Show-Check 'taskbar+tray: taskbar click shows the parked window' `
+        (Wait-WindowShown $h) ([MinMode]::Describe($h))
+    Invoke-TaskbarClick $h
+    $results += Show-Check 'taskbar+tray: clicking the icon again parks it again' `
+        (Wait-WindowHidden $h) ([MinMode]::Describe($h))
 
     # ------------------------------------------------ 3. tray only
     Set-Mode 'tray'

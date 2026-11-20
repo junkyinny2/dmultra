@@ -157,6 +157,22 @@ function Find-CaptionPoint([IntPtr] $h, $r, [int] $x) {
     return $null
 }
 
+# Last resort when another app owns the foreground: put our window in the
+# topmost band ourselves (HWND_TOPMOST -1) and undo it at the end
+# (HWND_NOTOPMOST -2). Flags 0x13 = NOMOVE | NOSIZE | NOACTIVATE, so nothing
+# but the Z-order band changes and no lasting change is left behind.
+$script:MadeTopmost = $false
+function Invoke-Topmost([IntPtr] $h) {
+    [void] [DmDrag.Win]::SetWindowPos($h, [IntPtr] (-1), 0, 0, 0, 0, 0x13)
+    $script:MadeTopmost = $true
+}
+function Clear-Topmost([IntPtr] $h) {
+    if ($script:MadeTopmost) {
+        [void] [DmDrag.Win]::SetWindowPos($h, [IntPtr] (-2), 0, 0, 0, 0, 0x13)
+        $script:MadeTopmost = $false
+    }
+}
+
 function Invoke-CaptionDrag([int] $x, [int] $y) {
     [void] [DmDrag.Win]::SetCursorPos($x, $y)
     Start-Sleep -Milliseconds 250
@@ -187,6 +203,16 @@ if ($null -eq $grabY) {
     $grabY = Find-CaptionPoint $hwnd $rect $grabX
 }
 if ($null -eq $grabY) {
+    # A maximized foreground app (VS Code covers the whole work area on this
+    # machine) is not obliged to give up the foreground, so both calls above can
+    # be refused legitimately. Raise ourselves into the topmost band instead.
+    Write-Host 'still covered; putting our window in the topmost band for this run'
+    Invoke-Topmost $hwnd
+    Start-Sleep -Milliseconds 500
+    $grabY = Find-CaptionPoint $hwnd $rect $grabX
+}
+if ($null -eq $grabY) {
+    Clear-Topmost $hwnd
     throw 'our window will not come to the top of the Z-order at its caption - close whatever covers it and re-run'
 }
 Write-Host ("grabbing the caption at ({0},{1})" -f $grabX, $grabY)
@@ -204,13 +230,24 @@ if ($dr.Left -eq $originX -and $dr.Top -eq $originY) {
     Start-Sleep -Milliseconds 700
     if (-not [DmDrag.Win]::GetWindowRect($hwnd, [ref] $rect)) { throw 'GetWindowRect failed' }
     $retryY = Find-CaptionPoint $hwnd $rect $grabX
-    if ($null -eq $retryY) { throw 'the drag could not be started: our caption is still covered' }
+    if ($null -eq $retryY -and -not $script:MadeTopmost) {
+        Invoke-Topmost $hwnd
+        Start-Sleep -Milliseconds 500
+        $retryY = Find-CaptionPoint $hwnd $rect $grabX
+    }
+    if ($null -eq $retryY) {
+        Clear-Topmost $hwnd
+        throw 'the drag could not be started: our caption is still covered'
+    }
     Invoke-CaptionDrag $grabX $retryY
     [void] [DmDrag.Win]::GetWindowRect($hwnd, [ref] $dr)
     if ($dr.Left -eq $originX -and $dr.Top -eq $originY) {
         throw 'the synthesized drag never engaged the modal move loop - the measurement is invalid'
     }
 }
+
+# Back out of the topmost band before anything is reported or restored.
+Clear-Topmost $hwnd
 
 Write-Host ''
 Write-Host 'frame cost by mode:'

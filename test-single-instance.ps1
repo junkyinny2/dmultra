@@ -26,6 +26,8 @@ public class SingleWin {
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     delegate bool EnumProc(IntPtr h, IntPtr l);
     static IntPtr Found;
     static uint Wanted;
@@ -53,6 +55,58 @@ function Get-MainWindow {
     return [SingleWin]::Find([uint32]$process.Id)
 }
 
+function Get-WindowState([IntPtr]$hwnd) {
+    if ($hwnd -eq [IntPtr]::Zero) {
+        return [pscustomobject]@{ Visible = $false; Iconic = $false; OffScreen = $true
+                                  Left = 0; Top = 0; OutOfSight = $false; Window = $false }
+    }
+    $r = New-Object SingleWin+RECT
+    [void][SingleWin]::GetWindowRect($hwnd, [ref]$r)
+    $vis = [SingleWin]::IsWindowVisible($hwnd)
+    $ico = [SingleWin]::IsIconic($hwnd)
+    $off = $r.Left -lt -10000
+    return [pscustomobject]@{
+        Visible    = $vis
+        Iconic     = $ico
+        OffScreen  = $off
+        Left       = $r.Left
+        Top        = $r.Top
+        Window     = $true
+        OutOfSight = ($ico -or -not $vis -or $off)
+    }
+}
+
+function Format-WindowState([IntPtr]$hwnd) {
+    $s = Get-WindowState $hwnd
+    if (-not $s.Window) { return 'no window' }
+    return ('visible={0} iconic={1} at=({2},{3}) off-screen={4}' -f `
+        $s.Visible, $s.Iconic, $s.Left, $s.Top, $s.OffScreen)
+}
+
+# D-007: a hidden main window is a park - off-screen at (-32000,-32000) while it
+# stays WS_VISIBLE and non-iconic, because eframe only paints the progress
+# popouts from a visible root. A window is also briefly not-visible right after
+# it is created (eframe's anti-flash), so one sample proves nothing: require the
+# out-of-sight state to hold so only the settled park counts.
+function Test-SettledOutOfSight([IntPtr]$hwnd, [int]$holdMs = 1500) {
+    $deadline = (Get-Date).AddMilliseconds($holdMs)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-WindowState $hwnd).OutOfSight) { return $false }
+        Start-Sleep -Milliseconds 100
+    }
+    return $true
+}
+
+function Test-SettledOnScreen([IntPtr]$hwnd, [int]$holdMs = 800) {
+    $deadline = (Get-Date).AddMilliseconds($holdMs)
+    while ((Get-Date) -lt $deadline) {
+        $s = Get-WindowState $hwnd
+        if (-not ($s.Visible -and -not $s.Iconic -and -not $s.OffScreen)) { return $false }
+        Start-Sleep -Milliseconds 100
+    }
+    return $true
+}
+
 function Wait-For([scriptblock]$condition, [int]$seconds = 15) {
     $deadline = (Get-Date).AddSeconds($seconds)
     while ((Get-Date) -lt $deadline) {
@@ -76,25 +130,26 @@ try {
     Remove-Item $showRequest -Force -ErrorAction SilentlyContinue
 
     Start-Process $exe -ArgumentList '--background' -WorkingDirectory $root
-    $hidden = Wait-For {
-        $hwnd = Get-MainWindow
-        $hwnd -ne [IntPtr]::Zero -and
-            -not [SingleWin]::IsWindowVisible($hwnd) -and
-            -not [SingleWin]::IsIconic($hwnd)
-    }
-    Check $hidden 'background launch created a hidden main window'
+    $found = Wait-For { (Get-MainWindow) -ne [IntPtr]::Zero }
+    $parked = $found -and (Test-SettledOutOfSight (Get-MainWindow))
+    Check $parked 'background launch parks the main window out of sight' (Format-WindowState (Get-MainWindow))
 
     Start-Process $exe -WorkingDirectory $root
-    $shown = Wait-For {
-        $hwnd = Get-MainWindow
-        $hwnd -ne [IntPtr]::Zero -and
-            [SingleWin]::IsWindowVisible($hwnd) -and
-            -not [SingleWin]::IsIconic($hwnd)
+    # A parked window is still WS_VISIBLE, so "visible" alone says nothing about
+    # a reveal: wait until it is genuinely back on screen, then require it to hold.
+    $revealed = Wait-For {
+        $s = Get-WindowState (Get-MainWindow)
+        $s.Visible -and -not $s.Iconic -and -not $s.OffScreen
     }
-    Check $shown 'second launch revealed the running window'
+    $shown = $revealed -and (Test-SettledOnScreen (Get-MainWindow))
+    Check $shown 'second launch revealed the running window' (Format-WindowState (Get-MainWindow))
 
+    # The second launch hands its request to the running instance and returns, so
+    # wait for it to exit instead of racing its shutdown: the contract is that
+    # one process remains, not that one is seen at one arbitrary instant.
+    $alone = Wait-For { (@(Get-Process dmultra -ErrorAction SilentlyContinue).Count -eq 1) } 10
     $count = @(Get-Process dmultra -ErrorAction SilentlyContinue).Count
-    Check ($count -eq 1) 'second launch did not start a duplicate process' "count=$count"
+    Check $alone 'second launch did not start a duplicate process' "count=$count"
     Check (-not (Test-Path $showRequest)) 'show request was consumed'
 } finally {
     Get-Process dmultra -ErrorAction SilentlyContinue | Stop-Process -Force
