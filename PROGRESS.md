@@ -456,3 +456,47 @@
   mode, which is what v0.078 fixes. No source change, so `VERSION` stays 0.078 and the
   release zip is unchanged.
 
+
+### v0.079 - 2026-11-24 - the taskbar button is really gone (D-025, D-026)
+
+- The user rejected the v0.078 verification: "did you verify this worked? its still
+  showing on the taskbar". That was correct. The 8/8 and 16/16 suites had asserted
+  `WS_EX_TOOLWINDOW`, not the shell's button. A real UI Automation probe of
+  `Shell_TrayWnd` (`diag-taskbar.ps1`) showed `dmultra - 1 running window` after Apply,
+  after OK and after `WM_CLOSE`, with the main window parked at `(-32000,-32000)` and
+  `tool=True`. The style proxy had never answered the user's question.
+- A live COM experiment (`test-deletetab2.ps1`) proved the mechanism: with CLSID
+  `56FDF344-FD6D-11D0-958A-006097C9A090` and IID
+  `56FDF342-FD6D-11D0-958A-006097C9A090`, `ITaskbarList::HrInit` and `DeleteTab` both
+  returned 0 and the UIA button count went 1 -> 0; `AddTab` took it back to 1. Earlier
+  attempts failed because a wrong CLSID gave `REGDB_E_CLASSNOTREG` and PowerShell
+  could not cast the `__ComObject`; the fix was a hand-written vtable in Rust instead.
+- `src/browser.rs::wakeup` now contains that vtable and `set_taskbar_tab(hwnd, add)`:
+  `park(true)` issues `DeleteTab`, `park(false)`/unpark issue `AddTab`. Calls are
+  deduplicated with `TAB_PRESENT` and throttled to 200 ms because the GUI safety net
+  calls `hide_main_window()` every frame. Only real transitions are logged, so the
+  log no longer floods. Closing Options can make the shell recreate the group button,
+  so `reassert_taskbar_tab_hidden()` opens a 2 s re-delete window when the dialog closes
+  (a one-shot re-apply on the closing frame was measured too early).
+- `src/gui.rs` applies the new mode as soon as Options saves it and suppresses the
+  activation churn from Apply/OK while Options is open after a switch to `Tray only`
+  (D-026). It also re-applies the hidden state and opens the re-assert window when
+  Options actually closes.
+- Real UIA stage results after the fix (launched -> SC_MINIMIZE -> Options open ->
+  tray selected -> Apply -> OK -> WM_CLOSE):
+  `1 -> 1 -> "2 running windows" -> "1 running window" -> "1 running window" -> 0 -> 0`.
+  The button visible up to OK is the still-open Options window, which is a legitimate
+  separate OS window (D-002); once it closes there is no DM Ultra taskbar button.
+- `test-tray-only-transition.ps1` rewritten to query `Shell_TrayWnd` through UIA:
+  **11/11 PASS** (group drops from two windows to one at Apply, zero buttons after OK
+  and after `WM_CLOSE`, window parked, process alive, explicit delete and mode-change
+  lines in the log). It also binds to the hwnd with `AutomationElement.FromHandle`
+  because the Win32 window exists before winit publishes its title to UIA.
+- `test-minimize-modes.ps1` rewritten to use the same real UIA buttons instead of the
+  style proxy: **16/16 PASS**; its traces now print `taskbarButtons=1:dmultra - 1
+  running window` in the two taskbar modes and `taskbarButtons=0:` in tray-only.
+- Regression proof on the deployed v0.079 binaries: `build.ps1 check` 0 errors /
+  80 warnings; `checkpoint.ps1 test -StopApp` exit 0 (31 rust, 9 extension, 44 drag
+  frames median 0.1 ms, 102 idle frames median 0.5 ms); minimize-modes 16/16,
+  tray-only-transition 11/11, minimized-progress 6/6, minimized-capture exit 0,
+  single-instance 4/4. `checkpoint.ps1 verify` exit 0.

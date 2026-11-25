@@ -116,6 +116,30 @@ per-version detail. Add new work under **Todo**, newest P0 first.
       window. 8/8 checks pass against the released v0.078 binaries (`taskbar=False`,
       process alive). No source change, so no new version was cut.
 
+### v0.079 - the real taskbar button (done 2026-11-24)
+
+- [x] Proved the v0.078 verification was invalid: the user could still see the button, and
+      a UI Automation probe of the shell's `Shell_TrayWnd` showed `dmultra - 1 running
+      window` after Apply, OK and `WM_CLOSE` while `WS_EX_TOOLWINDOW` was set. The old
+      suites only asserted the style bit. Recorded as D-025.
+- [x] Proved the mechanism live with a COM probe: `ITaskbarList::DeleteTab` takes the real
+      UIA button from 1 to 0, `AddTab` puts it back. Added a hand-written vtable in
+      `src/browser.rs::wakeup` and wired `DeleteTab` into `park(true)` / `unpark` and
+      `AddTab` into `park(false)`. Calls are deduplicated and throttled (200 ms); the
+      one-shot re-apply at Options-close was too early, so `reassert_taskbar_tab_hidden()`
+      opens a 2 s window of re-deletes (D-025).
+- [x] `src/gui.rs` applies the new mode when Options saves it and suppresses the Apply/OK
+      activation of the parked main window (D-026), then re-applies the hidden state when
+      Options closes so the shell cannot resurrect the group button.
+- [x] Rewrote both GUI suites to query the shell's own UIA buttons instead of the style
+      proxy: `test-tray-only-transition.ps1` **11/11 PASS** (main window leaves the group
+      at Apply, zero buttons after OK and after `WM_CLOSE`) and `test-minimize-modes.ps1`
+      **16/16 PASS**. The stage-by-stage UIA trace is in `PROGRESS.md` v0.079.
+- [x] Re-measured on the deployed v0.079 binaries: `build.ps1 check` 0 errors / 80 warnings,
+      `checkpoint.ps1 test -StopApp` exit 0 (31 rust, 9 extension, 44 drag frames median
+      0.1 ms), minimized-progress 6/6, minimized-capture exit 0, single-instance 4/4,
+      `checkpoint.ps1 verify` exit 0. Version bumped to 0.079; tag, zip and push below.
+
 ### P0 - tree green, v0.074 and v0.075 landed - done 2026-11-19
 
 - [x] Version drift killed and made permanent: `EXT_VERSION = env!("CARGO_PKG_VERSION")`
@@ -210,7 +234,7 @@ per-version detail. Add new work under **Todo**, newest P0 first.
 
 ## Doing
 
-- Nothing in flight.
+- v0.079 release bookkeeping: zip source + both exes, tag `v0.079`, push, verify hashes.
 
 ## Todo
 
@@ -273,7 +297,7 @@ checkboxes are stale, so this list is the live version)
 | Release build | `cd C:\dmultra-base; .\build.ps1 build --release` | ok (kill any running dmultra first) |
 | Memory files | `cd C:\dmultra-base; .\checkpoint.ps1 verify` | must exit 0 |
 | Everything at once | `cd C:\dmultra-base; .\checkpoint.ps1 test -StopApp` | exit 0 (measured 2026-11-24 on the deployed v0.078): rust 31/31, extension 9/9, 44 drag frames median 0.1 ms. `-SkipGui` drops the cursor-dependent harness |
-| GUI end-to-end | `pwsh -NoProfile -File .\test-<name>.ps1` (fresh process each: `Add-Type` collides in a reused shell), and stop the running instance before **each** script - they start their own and several leave one running | measured 2026-11-24 on the released v0.078 binaries: minimize-modes 16/16, tray-only-transition 8/8; placement 7/7, startup-registry 6/6, single-instance 4/4, minimized-progress 6/6, minimized-capture exit 0 were last measured 2026-11-19 on v0.077 |
+| GUI end-to-end | `pwsh -NoProfile -File .\test-<name>.ps1` (fresh process each: `Add-Type` collides in a reused shell), and stop the running instance before **each** script - they start their own and several leave one running | measured 2026-11-24 on the deployed v0.079 binaries with **real UIA taskbar buttons**: minimize-modes 16/16, tray-only-transition 11/11, minimized-progress 6/6, minimized-capture exit 0, single-instance 4/4; placement 7/7 and startup-registry 6/6 were last measured 2026-11-19 on v0.077 |
 | Frame cost by mode | `pwsh -NoProfile -File .\test-window-drag-profile.ps1` (add `-ChildUrl <url>` to drag with a progress window open) | v0.078: 44 drag frames median 0.1 ms, idle median 0.6 ms. v0.077: 259 drag frames median 0.1 ms (max 1.4), idle median 0.7 ms - works with a maximized app in the foreground via topmost-band escalation. v0.076: drag 0.2 ms plain / 0.6 ms with a popout, idle median 0.7 ms. v0.075 measured 200.5 / 402.7 / 200.6 / 402.2 ms |
 
 Deploy after a release build: copy `target\release\dmultra.exe` AND

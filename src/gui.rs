@@ -1010,6 +1010,10 @@ pub struct DmApp {
     manager: Arc<Manager>,
     show_flag: Arc<Mutex<bool>>,
     show_main_window: bool,
+    /// Keep ignoring activation-driven restores while Options is open after
+    /// the user switched to Tray only, so pressing OK does not bring the
+    /// window (and its taskbar button) straight back (D-026).
+    suppress_options_restore: bool,
     /// One-shot: hide the main window after eframe's first-frame
     /// anti-flash `set_visible(true)` when starting in the background.
     hide_main_window: bool,
@@ -1156,6 +1160,7 @@ impl DmApp {
             manager,
             show_flag,
             show_main_window: !start_hidden,
+            suppress_options_restore: false,
             hide_main_window: start_hidden,
             tray_icon,
             tray_visible: true,
@@ -2421,6 +2426,28 @@ impl eframe::App for DmApp {
         crate::browser::install_main_hook();
         crate::browser::set_main_window_mode(effective_mode);
 
+        // Apply/OK in the separate Options window activates the parked main
+        // window. Keep swallowing that side effect for as long as Options is
+        // open after a switch to Tray only; once it closes, one final short
+        // suppression covers the last activation and normal restores resume.
+        if self.suppress_options_restore {
+            crate::browser::suppress_restore_after_mode_change();
+            if !self.settings_dialog.open {
+                self.suppress_options_restore = false;
+                // Windows can recreate the grouped taskbar button when the
+                // last window of the group (Options) closes. Re-issue the
+                // explicit DeleteTab now that no child window remains, and
+                // keep doing so briefly because the shell does that on a
+                // delay of its own (D-025).
+                crate::browser::reassert_taskbar_tab_hidden();
+                crate::browser::hide_main_window();
+                crate::logfile::log(
+                    "TRAY",
+                    "tray-only taskbar state re-applied after Options closed",
+                );
+            }
+        }
+
         // The waker delivers the frame that notices a minimize; eframe cannot
         // schedule one by itself for an iconic window. With the park hook this
         // is only a safety net.
@@ -3565,10 +3592,50 @@ impl eframe::App for DmApp {
                     .quota
                     .update_config(new_settings.quota.clone());
                 let auto_startup = new_settings.auto_startup;
+                let old_mode = normalize_minimize_mode(&self.manager.lock_ui().settings.minimize_mode);
+                let new_mode = normalize_minimize_mode(&new_settings.minimize_mode);
+                let tray_available = self.tray_icon.is_some();
                 let mut st = self.manager.lock_ui();
                 st.settings = new_settings;
                 let _ = st.save();
                 drop(st);
+
+                // The shell needs to be told about the new mode right now, not
+                // on the next minimize. The Options viewport is a separate OS
+                // window whose Apply/OK press activates the parked main window;
+                // suppress those activations while the new state is applied so
+                // the taskbar button does not immediately come back (D-026).
+                crate::browser::set_main_window_mode(if tray_available {
+                    new_mode
+                } else {
+                    "taskbar"
+                });
+                if old_mode != new_mode {
+                    if new_mode == "tray" && tray_available {
+                        self.suppress_options_restore = true;
+                        crate::browser::suppress_restore_after_mode_change();
+                        crate::browser::reassert_taskbar_tab_hidden();
+                        crate::browser::main_window_restore_requested();
+                        self.show_main_window = false;
+                        crate::browser::hide_main_window();
+                        crate::logfile::log(
+                            "TRAY",
+                            "minimize mode changed to tray only; window and taskbar button hidden",
+                        );
+                    } else {
+                        self.suppress_options_restore = false;
+                        if crate::browser::main_window_parked() {
+                            // Stay parked, but bring the taskbar button back.
+                            self.show_main_window = true;
+                            crate::browser::park_main_window_keeping_taskbar();
+                            crate::logfile::log(
+                                "TRAY",
+                                "minimize mode changed while parked; taskbar button kept",
+                            );
+                        }
+                    }
+                }
+
                 match crate::startup::sync(auto_startup) {
                     Ok(()) => {
                         self.status_bar = "Settings saved.".into();

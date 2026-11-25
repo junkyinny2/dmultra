@@ -956,6 +956,29 @@ pub fn main_window_restore_requested() -> bool {
     false
 }
 
+/// Ignore activation-driven restores briefly while a minimize-mode change is
+/// applied from Options. See D-026.
+#[cfg(windows)]
+pub fn suppress_restore_after_mode_change() {
+    // Short because the GUI refreshes this every frame while the Options
+    // window is open; it only has to cover one frame of activation churn.
+    wakeup::suppress_restore_for(600);
+}
+
+#[cfg(not(windows))]
+pub fn suppress_restore_after_mode_change() {}
+
+/// Keep re-issuing `ITaskbarList::DeleteTab` for a short window. Closing the
+/// last child window (Options) can make the shell recreate the grouped button
+/// after the first delete; see D-025.
+#[cfg(windows)]
+pub fn reassert_taskbar_tab_hidden() {
+    wakeup::reassert_taskbar_tab_for(2000);
+}
+
+#[cfg(not(windows))]
+pub fn reassert_taskbar_tab_hidden() {}
+
 /// True while the user is dragging or resizing one of our windows with the
 /// mouse (the main window or any popout).
 ///
@@ -1024,8 +1047,9 @@ pub fn refresh_popup_hooks() -> usize {
 mod wakeup {
     use std::collections::HashMap;
     use std::ffi::c_int;
-    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, Ordering};
     use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[repr(C)]
     #[derive(Default, Clone, Copy)]
@@ -1090,6 +1114,10 @@ mod wakeup {
     /// Alt+Tab, any activation). The GUI must clear its "hidden" state on the
     /// next frame, otherwise its own safety net parks the window again.
     static RESTORE_REQUESTED: AtomicBool = AtomicBool::new(false);
+    /// Until this wall-clock millisecond, activations of the parked main
+    /// window are side effects of applying a minimize-mode change in Options,
+    /// not a request to bring the window back (D-026).
+    static SUPPRESS_RESTORE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
     /// `0` = taskbar, `1` = taskbar+tray, `2` = tray only.
     static MAIN_MODE: AtomicU8 = AtomicU8::new(1);
     /// A progress/dialog child window is open right now.
@@ -1126,6 +1154,154 @@ mod wakeup {
             cy: i32,
             flags: u32,
         ) -> c_int;
+    }
+
+    // -----------------------------------------------------------------------
+    // ITaskbarList: the only reliable way to remove an existing taskbar button
+    // -----------------------------------------------------------------------
+    //
+    // Changing WS_EX_TOOLWINDOW and cycling ShowWindow is not enough on this
+    // machine - the shell keeps drawing the button it already created. An
+    // explicit DeleteTab call removes it immediately; AddTab puts it back.
+    // Verified with a live UIA taskbar-button probe (v0.079).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Guid {
+        data1: u32,
+        data2: u16,
+        data3: u16,
+        data4: [u8; 8],
+    }
+
+    const CLSID_TASKBAR_LIST: Guid = Guid {
+        data1: 0x56FD_F344,
+        data2: 0xFD6D,
+        data3: 0x11D0,
+        data4: [0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90],
+    };
+    const IID_TASK_BAR_LIST: Guid = Guid {
+        data1: 0x56FD_F342,
+        data2: 0xFD6D,
+        data3: 0x11D0,
+        data4: [0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90],
+    };
+    const CLSCTX_ALL: u32 = 0x17;
+    const COINIT_APARTMENTTHREADED: u32 = 0x02;
+    const S_FALSE: i32 = 1;
+
+    type HrFn = unsafe extern "system" fn(*mut core::ffi::c_void) -> i32;
+    type TabFn = unsafe extern "system" fn(*mut core::ffi::c_void, isize) -> i32;
+
+    #[repr(C)]
+    struct TaskbarVtbl {
+        query_interface: unsafe extern "system" fn(
+            *mut core::ffi::c_void,
+            *const Guid,
+            *mut *mut core::ffi::c_void,
+        ) -> i32,
+        add_ref: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+        release: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+        hr_init: HrFn,
+        add_tab: TabFn,
+        delete_tab: TabFn,
+        activate_tab: TabFn,
+        set_active_alt: TabFn,
+    }
+
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoInitializeEx(reserved: *mut core::ffi::c_void, co_init: u32) -> i32;
+        fn CoUninitialize();
+        fn CoCreateInstance(
+            class: *const Guid,
+            outer: *mut core::ffi::c_void,
+            context: u32,
+            interface: *const Guid,
+            object: *mut *mut core::ffi::c_void,
+        ) -> i32;
+    }
+
+    /// Our best knowledge of the shell's tab state for the main window. The
+    /// window starts out with a button, so `true` is the safe initial value.
+    static TAB_PRESENT: AtomicBool = AtomicBool::new(true);
+    /// Last AddTab/DeleteTab call, used to throttle the re-assert window.
+    static TAB_LAST_MS: AtomicU64 = AtomicU64::new(0);
+    /// Until this wall-clock millisecond the shell may recreate the grouped
+    /// taskbar button when a child window (typically Options) closes, so keep
+    /// re-issuing DeleteTab every 200 ms instead of once per frame forever.
+    static TAB_REASSERT_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+
+    /// Cover the window in which the shell can recreate a grouped taskbar
+    /// button after the last child window closes (D-025).
+    pub(super) fn reassert_taskbar_tab_for(millis: u64) {
+        TAB_REASSERT_UNTIL_MS.store(now_ms().saturating_add(millis), Ordering::Relaxed);
+    }
+
+    /// Explicitly add or delete the shell taskbar button for the main window.
+    /// Idempotent and throttled: `park(true)` runs on every hidden frame, and
+    /// `hide_main_window()` is called by the GUI's safety net every frame, so
+    /// an unguarded COM call here would also show up in the frame budget.
+    fn set_taskbar_tab(hwnd: isize, add: bool) {
+        let now = now_ms();
+        let reasserting = now < TAB_REASSERT_UNTIL_MS.load(Ordering::Relaxed);
+        let log_call;
+        if add {
+            if TAB_PRESENT.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            log_call = true;
+        } else {
+            let first_delete = TAB_PRESENT.swap(false, Ordering::Relaxed);
+            if !first_delete
+                && (!reasserting
+                    || now.saturating_sub(TAB_LAST_MS.load(Ordering::Relaxed)) < 200)
+            {
+                return;
+            }
+            log_call = first_delete;
+        }
+        TAB_LAST_MS.store(now, Ordering::Relaxed);
+
+        use core::ffi::c_void;
+        unsafe {
+            let init = CoInitializeEx(core::ptr::null_mut(), COINIT_APARTMENTTHREADED);
+            // S_FALSE means COM was already initialised on this thread; this
+            // call still took a reference and must be balanced.
+            let owns_init = init == 0 || init == S_FALSE;
+            let mut object: *mut c_void = core::ptr::null_mut();
+            let hr = CoCreateInstance(
+                &CLSID_TASKBAR_LIST,
+                core::ptr::null_mut(),
+                CLSCTX_ALL,
+                &IID_TASK_BAR_LIST,
+                &mut object,
+            );
+            if hr == 0 && !object.is_null() {
+                let vtable = *(object as *const *const TaskbarVtbl);
+                if ((*vtable).hr_init)(object) == 0 {
+                    let call = if add {
+                        (*vtable).add_tab
+                    } else {
+                        (*vtable).delete_tab
+                    };
+                    let rc = call(object, hwnd);
+                    // Only the state transitions are logged. The re-assert
+                    // calls are invisible and would otherwise flood the log.
+                    if log_call {
+                        debug_log(&format!(
+                            "taskbar tab {} (hr={rc:#X})",
+                            if add { "added" } else { "deleted" }
+                        ));
+                    }
+                }
+                ((*vtable).release)(object);
+            } else {
+                debug_log(&format!("ITaskbarList unavailable (hr={hr:#X})"));
+            }
+            if owns_init {
+                CoUninitialize();
+            }
+        }
     }
 
     extern "system" fn find_main(hwnd: isize, found: isize) -> i32 {
@@ -1254,6 +1430,34 @@ mod wakeup {
         no_taskbar != has_tool
     }
 
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Ignore activation-driven restores for a short period after an Options
+    /// change. The Options viewport is a separate OS window; pressing Apply or
+    /// OK activates the parked main window, which D-023 quite reasonably treats
+    /// as "show me". While the new mode is being applied, that activation is a
+    /// side effect of the click and must not undo the hide.
+    pub(super) fn suppress_restore_for(millis: u64) {
+        SUPPRESS_RESTORE_UNTIL_MS.store(now_ms().saturating_add(millis), Ordering::Relaxed);
+    }
+
+    fn restore_suppressed() -> bool {
+        let until = SUPPRESS_RESTORE_UNTIL_MS.load(Ordering::Relaxed);
+        if until == 0 {
+            return false;
+        }
+        if now_ms() >= until {
+            SUPPRESS_RESTORE_UNTIL_MS.store(0, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
     /// Park the main window off-screen while keeping it `WS_VISIBLE` and
     /// non-iconic, so eframe keeps scheduling frames for the child popouts.
     ///
@@ -1262,6 +1466,12 @@ mod wakeup {
         let Some(hwnd) = main_window() else {
             return;
         };
+        // Keep our shell-tab state in step with the requested mode. Both calls
+        // are idempotent and throttled inside `set_taskbar_tab`. Closing the
+        // Options window can make Windows recreate the grouped button after an
+        // earlier DeleteTab, so a short re-assert window is opened by the GUI
+        // when that happens (D-025).
+        set_taskbar_tab(hwnd, !no_taskbar);
         let already = PARKED.load(Ordering::Relaxed);
         let iconic = unsafe { IsIconic(hwnd) != 0 };
         let has_tool = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) }
@@ -1304,6 +1514,7 @@ mod wakeup {
                 SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style(hwnd) & !(WS_EX_TOOLWINDOW as isize));
             }
             PARK_TOOL_ADDED.store(false, Ordering::Relaxed);
+            set_taskbar_tab(hwnd, true);
         }
 
         // A style change only reaches the taskbar after a show/hide cycle.
@@ -1343,6 +1554,7 @@ mod wakeup {
                 ShowWindow(hwnd, SW_HIDE);
                 ShowWindow(hwnd, SW_SHOW);
             }
+            set_taskbar_tab(hwnd, true);
         }
         if unsafe { IsIconic(hwnd) } != 0 {
             unsafe {
@@ -1473,6 +1685,10 @@ mod wakeup {
             // parked as that request; before this the click was swallowed and
             // the window stayed off-screen.
             if parked && (cmd == SC_MINIMIZE || cmd == SC_RESTORE) {
+                if restore_suppressed() {
+                    debug_log("syscommand ignored after minimize-mode change");
+                    return 0;
+                }
                 restore_from_park(hwnd, "syscommand while parked");
                 return 0;
             }
@@ -1490,6 +1706,10 @@ mod wakeup {
         } else if msg == WM_ACTIVATE && (wparam & 0xFFFF) != 0 {
             // Taskbar button click, Alt+Tab, tray restore.
             if PARKED.load(Ordering::Relaxed) {
+                if restore_suppressed() {
+                    debug_log("activation ignored after minimize-mode change");
+                    return 0;
+                }
                 restore_from_park(hwnd, "activated while parked");
                 return 0;
             }

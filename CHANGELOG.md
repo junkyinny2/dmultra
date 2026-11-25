@@ -7,17 +7,14 @@ in version X". Newest first. Status column: `released` = tagged and published,
 
 ## Unreleased
 
-- v0.078 is built and deployed (deployed hashes re-verified against the release zip).
-  Added `test-tray-only-transition.ps1` after the tag: it drives the real Options dialog
-  through the reported tray-only transition and passes 8/8; no source change, so no new
-  version was cut. The manual `chrome://extensions` -> Reload from v0.075 is still the
-  only outstanding user-side step (the deployed `content.js` is byte-identical to the repo
-  copy).
+- The manual `chrome://extensions` -> Reload from v0.075 is still the only outstanding
+  user-side step (the deployed `content.js` is byte-identical to the repo copy).
 
 ## Released history
 
 | Version | Status | Headline |
 |---|---|---|
+| v0.079 | tagged + zip | The shell's taskbar button is now really removed in `Tray only` mode: an explicit `ITaskbarList::DeleteTab` (D-025) replaces the unreliable `WS_EX_TOOLWINDOW` proxy, with a short re-assert window after Options closes and activation suppression around Apply/OK (D-026). Both GUI suites now assert the real UIA taskbar button: transition 11/11, minimize-modes 16/16. |
 | v0.078 | tagged + zip | Switching to `Tray only` while the main window was already parked now removes the taskbar button: the `WS_EX_TOOLWINDOW` change is followed by the hide/show cycle the shell needs, even when the window is already parked. A popout opened while the main window is iconic also honours the selected minimize mode instead of hard-coding "keep the taskbar button". |
 | v0.077 | tagged + zip | Clicking the taskbar button of a parked main window shows it again. A parked window is still `WS_VISIBLE`, so the shell sends `SC_MINIMIZE` (not `SC_RESTORE`) on that click and the hook used to park it right back. `test-single-instance.ps1` and `test-window-drag-profile.ps1` also stopped lying: one asserted the pre-D-007 hide semantics, the other could not run against a maximized foreground app. |
 | v0.076 | tagged + zip | Window dragging is no longer capped at ~5 fps: the Win32 window sweep is cached and skipped inside the modal move loop. Measured with a progress window open: 402 ms -> 0.6 ms per frame, 3 -> 40 frames during one title-bar drag, popout close latency 288 ms -> 4 ms. |

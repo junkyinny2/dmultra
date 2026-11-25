@@ -1,16 +1,10 @@
-# Regression test: change Minimize behavior to "Tray only" from the real
-# Options dialog while the main window is parked, then close it and assert
-# that no taskbar button remains.
-#
-# test-minimize-modes.ps1 starts a fresh process for each mode, so it cannot
-# cover this transition. Changing the option activates the parked main window
-# (D-023 restores on activation), so the button legitimately comes back until
-# the next close/minimize. The contract checked here is that the following
-# close hides the window from the taskbar - the path v0.078 repaired by making
-# park() refresh the shell after changing WS_EX_TOOLWINDOW.
+# Regression test: changing Minimize behavior to "Tray only" from the real
+# Options dialog must remove the *actual shell taskbar button* immediately,
+# not merely set WS_EX_TOOLWINDOW. Windows 11 keeps an existing button until
+# ITaskbarList::DeleteTab is called, so the style bit is not a sufficient check.
 #
 # Usage: pwsh -NoProfile -File .\test-tray-only-transition.ps1
-#        Run in a fresh shell (Add-Type names collide in a reused shell), and
+#        Run in a fresh shell (Add-Type names collide in a reused one), and
 #        stop any running dmultra instance first.
 
 $ErrorActionPreference = 'Stop'
@@ -60,16 +54,12 @@ public class TrayTransition {
         RECT r; if (!GetWindowRect(h, out r)) return false;
         return r.Left <= -10000 || r.Right <= -10000;
     }
-    public static bool HasTaskbarButton(IntPtr h) {
-        if (!IsWindow(h) || IsIconic(h) || !IsWindowVisible(h)) return false;
-        long ex = GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64();
-        return (ex & WS_EX_TOOLWINDOW) == 0;
-    }
     public static string Describe(IntPtr h) {
         RECT r; string pos = GetWindowRect(h, out r)
             ? string.Format("({0},{1})", r.Left, r.Top) : "(no rect)";
-        return string.Format("iconic={0} visible={1} at={2} taskbar={3}",
-            IsIconic(h), IsWindowVisible(h), pos, HasTaskbarButton(h));
+        long ex = IsWindow(h) ? GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64() : 0;
+        return string.Format("iconic={0} visible={1} at={2} tool={3}",
+            IsIconic(h), IsWindowVisible(h), pos, (ex & WS_EX_TOOLWINDOW) != 0);
     }
     public static void Click(int x, int y) {
         // egui needs a painted hover frame before the press; firing the move
@@ -82,6 +72,25 @@ public class TrayTransition {
     }
 }
 "@
+
+$AE = [System.Windows.Automation.AutomationElement]
+$Ids = [System.Windows.Automation.AutomationElementIdentifiers]
+
+function TaskbarButtonNames {
+    $taskbar = $AE::RootElement.FindFirst(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        (New-Object System.Windows.Automation.PropertyCondition($Ids::ClassNameProperty, 'Shell_TrayWnd')))
+    if ($null -eq $taskbar) { throw 'Shell_TrayWnd not found' }
+    $buttons = $taskbar.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        (New-Object System.Windows.Automation.PropertyCondition($Ids::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Button)))
+    return @($buttons | Where-Object { $_.Current.Name -match 'dmultra' } | ForEach-Object { $_.Current.Name })
+}
+
+function TaskbarButtonCount {
+    return @(TaskbarButtonNames).Count
+}
 
 $exe = 'C:\dmultra\dmultra.exe'
 $statePath = Join-Path $env:APPDATA 'dmultra\state.json'
@@ -96,11 +105,6 @@ function Check($label, [bool]$ok, $detail) {
     Write-Host ("[{0}] {1}  {2}" -f $mark, $label, $detail)
 }
 
-function Stop-App {
-    Get-Process dmultra -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Milliseconds 700
-}
-
 function Wait-For([scriptblock]$predicate, [int]$tries = 40) {
     for ($i = 0; $i -lt $tries; $i++) {
         Start-Sleep -Milliseconds 150
@@ -113,6 +117,15 @@ function Find-Element($root, [string]$name) {
     $cond = New-Object Windows.Automation.PropertyCondition(
         [Windows.Automation.AutomationElement]::NameProperty, $name)
     return $root.FindFirst([Windows.Automation.TreeScope]::Descendants, $cond)
+}
+
+function Wait-Element($root, [string]$name, [int]$tries = 20) {
+    for ($i = 0; $i -lt $tries; $i++) {
+        $found = Find-Element $root $name
+        if ($null -ne $found) { return $found }
+        Start-Sleep -Milliseconds 150
+    }
+    return $null
 }
 
 try {
@@ -143,22 +156,28 @@ try {
         if ($h -ne [IntPtr]::Zero) { $proc = $candidate; $hwnd = $h; break }
     }
     if ($hwnd -eq [IntPtr]::Zero) { throw 'main window did not appear' }
-    Start-Sleep -Milliseconds 900
 
-    $root = [Windows.Automation.AutomationElement]::RootElement
-    $pidCond = New-Object Windows.Automation.PropertyCondition(
-        [Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$proc.Id)
-    # Match the title by prefix so a VERSION bump does not break the test.
-    $appWindows = $root.FindAll([Windows.Automation.TreeScope]::Children, $pidCond)
-    $mainEl = $appWindows | Where-Object { $_.Current.Name -like 'DM Ultra*' } | Select-Object -First 1
+    $root = $AE::RootElement
+    $pidCond = New-Object Windows.Automation.PropertyCondition($AE::ProcessIdProperty, [int]$proc.Id)
+    # The Win32 hwnd exists before winit has published the title to UIA, so
+    # enumerating root children here can see only the invisible event-target
+    # pane. Bind straight to the handle and give the title a few frames to land.
+    $mainEl = $null
+    for ($i = 0; $i -lt 20; $i++) {
+        $candidateEl = $AE::FromHandle($hwnd)
+        if ($null -ne $candidateEl -and $candidateEl.Current.Name -like 'DM Ultra*') {
+            $mainEl = $candidateEl
+            break
+        }
+        Start-Sleep -Milliseconds 150
+    }
     if ($null -eq $mainEl) { throw 'main UI Automation element not found' }
 
     # Open Options from Downloads -> Options... (a separate OS window).
-    $downloads = Find-Element $mainEl 'Downloads'
+    $downloads = Wait-Element $mainEl 'Downloads'
     if ($null -eq $downloads) { throw 'Downloads menu not found' }
     $downloads.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
-    Start-Sleep -Milliseconds 400
-    $optionsMenu = Find-Element $mainEl 'Options...'
+    $optionsMenu = Wait-Element $mainEl 'Options...'
     if ($null -eq $optionsMenu) { throw 'Options... menu item not found' }
     $optionsMenu.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
     Start-Sleep -Milliseconds 900
@@ -167,76 +186,74 @@ try {
         [Windows.Automation.TreeScope]::Children,
         (New-Object Windows.Automation.AndCondition(
             $pidCond,
-            (New-Object Windows.Automation.PropertyCondition(
-                [Windows.Automation.AutomationElement]::NameProperty, 'Options')))))
+            (New-Object Windows.Automation.PropertyCondition($AE::NameProperty, 'Options')))))
     if ($null -eq $optionsEl) { throw 'Options window did not open' }
     $r = $optionsEl.Current.BoundingRectangle
     $ox = [int]$r.X
     $oy = [int]$r.Y
 
     # Park the main window while Options stays open. SC_MINIMIZE is the real
-    # path for taskbar_tray: WM_CLOSE always calls hide_main_window(), which
-    # deliberately hides from the taskbar regardless of the selected mode.
-    # In taskbar_tray mode the taskbar button must remain - this is the
-    # starting state of the bug.
+    # taskbar_tray path; WM_CLOSE always hides regardless of the selected mode.
     [TrayTransition]::PostMessageW($hwnd, 0x0112, [IntPtr]0xF020, [IntPtr]::Zero) | Out-Null
     $parked = Wait-For { [TrayTransition]::IsParkedOffScreen($hwnd) }
-    # Give the parked window and the Options viewport time to settle: clicks
-    # sent during the first repaint after SC_MINIMIZE are swallowed.
     Start-Sleep -Milliseconds 900
     Check 'main parked before changing the option' $parked ([TrayTransition]::Describe($hwnd))
-    Check 'taskbar button present before the change' ([TrayTransition]::HasTaskbarButton($hwnd)) ([TrayTransition]::Describe($hwnd))
+    # With the main window in taskbar_tray mode and Options open, Windows shows
+    # one grouped button for both windows. This is the real shell button, not
+    # the WS_EX_TOOLWINDOW proxy the older suites used.
+    $beforeNames = (TaskbarButtonNames) -join '|'
+    Check 'main window in the grouped taskbar button before the change' ($beforeNames -match '2 running windows') "buttons=$beforeNames"
 
     # Click the Minimize behavior dropdown, then "Tray only (hide from
-    # taskbar)". Offsets are relative to the observed 816x619 Options window.
+    # taskbar)" and Apply. Coordinates are relative to the Options viewport and
+    # were measured from the real dialog (see PROGRESS.md v0.079).
     [TrayTransition]::Click(($ox + 590), ($oy + 214))
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds 700
     [TrayTransition]::Click(($ox + 590), ($oy + 288))
-    Start-Sleep -Milliseconds 400
+    Start-Sleep -Milliseconds 700
     [TrayTransition]::Click(($ox + 660), ($oy + 587))  # Apply
     Start-Sleep -Milliseconds 900
 
     $saved = Get-Content $statePath -Raw | ConvertFrom-Json
     Check 'settings saved as tray' ($saved.settings.minimize_mode -eq 'tray') "minimize_mode=$($saved.settings.minimize_mode)"
-    Check 'process alive after changing the option' ([bool](Get-Process dmultra -ErrorAction SilentlyContinue)) ''
+    # The Options window is a separate OS window, so the group remains until
+    # it closes. What must change at Apply is that the main window leaves the
+    # group: two windows -> one.
+    $afterApply = (TaskbarButtonNames) -join '|'
+    Check 'main window leaves the taskbar group as soon as Apply is pressed' ($afterApply -match '1 running window') "buttons=$afterApply $([TrayTransition]::Describe($hwnd))"
 
-    # Close the dialog as a user would. OK closes it; leaving Options open
-    # keeps activating the parked main window and would hide the result.
     [TrayTransition]::Click(($ox + 780), ($oy + 587))  # OK
     Start-Sleep -Milliseconds 900
+    $afterOk = TaskbarButtonCount
+    Check 'taskbar button stays gone after closing Options' ($afterOk -eq 0) "buttons=$afterOk $([TrayTransition]::Describe($hwnd))"
+    Check 'process alive after changing the option' ([bool](Get-Process dmultra -ErrorAction SilentlyContinue)) ''
 
-    # The Options interaction restores the parked window by design (D-023).
-    # Now use the real close path: in tray-only mode it must park off-screen
-    # and take the taskbar button with it.
+    # The real close path must not resurrect the button.
     [TrayTransition]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
-    $hidden = Wait-For {
-        [TrayTransition]::IsParkedOffScreen($hwnd) -and -not [TrayTransition]::HasTaskbarButton($hwnd)
-    }
-    Check 'close hides from the taskbar after switching to tray only' $hidden ([TrayTransition]::Describe($hwnd))
-    Check 'process still alive after close in tray only' ([bool](Get-Process dmultra -ErrorAction SilentlyContinue)) ''
+    Start-Sleep -Milliseconds 900
+    $afterClose = TaskbarButtonCount
+    Check 'close keeps the taskbar button gone' ($afterClose -eq 0) "buttons=$afterClose $([TrayTransition]::Describe($hwnd))"
     Check 'main window parked' ([TrayTransition]::IsParkedOffScreen($hwnd)) ([TrayTransition]::Describe($hwnd))
+    Check 'process still alive after close in tray only' ([bool](Get-Process dmultra -ErrorAction SilentlyContinue)) ''
 
     $logAfter = if (Test-Path $logPath) { Get-Content $logPath -Raw } else { '' }
     $newLog = $logAfter.Substring([Math]::Min($logBefore.Length, $logAfter.Length))
-    Check 'tray close logged' ($newLog -match 'close button hid the main window to the tray') ''
+    Check 'explicit taskbar tab deletion logged' ($newLog -match 'taskbar tab deleted') ''
+    Check 'mode-change hide logged' ($newLog -match 'minimize mode changed to tray only') ''
     if ($env:DMULTRA_TRANSITION_DEBUG -eq '1') {
         ($newLog -split "`n") | Select-String -Pattern 'TRAY|WIN' | Select-Object -Last 20 | ForEach-Object { Write-Host "  LOG $($_.Line.Trim())" }
     }
-}
-catch {
+} catch {
     Check 'script completed' $false ($_.Exception.Message + ' | ' + $_.ScriptStackTrace)
-}
-finally {
+} finally {
     Get-Process dmultra -ErrorAction SilentlyContinue | Stop-Process -Force
-    if ($null -ne $stateBackup) {
-        [System.IO.File]::WriteAllText($statePath, $stateBackup)
-    }
+    if ($null -ne $stateBackup) { [System.IO.File]::WriteAllText($statePath, $stateBackup) }
     Remove-Item Env:DMULTRA_DEBUG -ErrorAction SilentlyContinue
 }
 
 if ($failures -eq 0) {
-    Write-Host 'PASS tray-only transition removed the taskbar button'
-    exit 0
+    Write-Host 'PASS tray-only transition removed the real taskbar button'
+} else {
+    Write-Host "FAIL $failures check(s)"
 }
-Write-Host "FAIL $failures check(s)"
-exit 1
+exit $failures

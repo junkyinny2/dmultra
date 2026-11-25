@@ -11,14 +11,19 @@
 # WS_EX_TOOLWINDOW so the taskbar button goes away; "taskbar + tray" keeps it.
 # Only plain "taskbar" mode (with no popout open) is allowed to become iconic.
 # So these checks assert "out of sight" (iconic OR hidden OR off-screen) plus
-# the presence of the taskbar button, never IsIconic alone - that stale
-# assumption is what made three of them fail against v0.073..v0.076.
+# the shell's ACTUAL taskbar button (queried through UI Automation), never
+# IsIconic or WS_EX_TOOLWINDOW alone - both stale assumptions made suites pass
+# while the user could still see the button. Windows 11 keeps an existing
+# button until ITaskbarList::DeleteTab is called (v0.079, D-025).
 #
 # Usage: .\test-minimize-modes.ps1
 #        Run it in a fresh shell (pwsh -NoProfile -File .\test-minimize-modes.ps1);
 #        a reused shell already has the MinMode type loaded and Add-Type collides.
 
 $ErrorActionPreference = 'Stop'
+
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
 
 Add-Type @"
 using System;
@@ -80,22 +85,13 @@ public class MinMode {
         return !IsWindowVisible(h) || IsIconic(h) || IsParkedOffScreen(h);
     }
 
-    // Win32 owns a taskbar button for a WS_VISIBLE window that is not a tool
-    // window; an iconic window keeps its button too.
-    public static bool HasTaskbarButton(IntPtr h) {
-        if (!IsWindow(h)) return false;
-        if (IsIconic(h)) return true;
-        if (!IsWindowVisible(h)) return false;
-        long ex = GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64();
-        return (ex & WS_EX_TOOLWINDOW) == 0;
-    }
-
     public static string Describe(IntPtr h) {
         RECT r;
         string pos = GetWindowRect(h, out r)
             ? string.Format("({0},{1})", r.Left, r.Top) : "(no rect)";
-        return string.Format("iconic={0} visible={1} at={2} taskbar={3}",
-            IsIconic(h), IsWindowVisible(h), pos, HasTaskbarButton(h));
+        long ex = IsWindow(h) ? GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64() : 0;
+        return string.Format("iconic={0} visible={1} at={2} tool={3}",
+            IsIconic(h), IsWindowVisible(h), pos, (ex & WS_EX_TOOLWINDOW) != 0);
     }
 
     static IntPtr MainHwnd;
@@ -135,6 +131,28 @@ $exe = 'C:\dmultra\dmultra.exe'
 $statePath = Join-Path $env:APPDATA 'dmultra\state.json'
 $logPath = Join-Path $env:APPDATA 'dmultra\logs\dmultra.log'
 $stateBackup = $null
+
+# The shell's own taskbar buttons, not WS_EX_TOOLWINDOW. Windows 11 keeps a
+# grouped button after the style bit changes until ITaskbarList::DeleteTab is
+# called, so the style flag cannot answer "is it still on the taskbar?".
+# The button belongs to Explorer and is named "dmultra - N running windows".
+$AE = [System.Windows.Automation.AutomationElement]
+$Ids = [System.Windows.Automation.AutomationElementIdentifiers]
+function Taskbar-ButtonNames {
+    $taskbar = $AE::RootElement.FindFirst(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        (New-Object System.Windows.Automation.PropertyCondition($Ids::ClassNameProperty, 'Shell_TrayWnd')))
+    if ($null -eq $taskbar) { throw 'Shell_TrayWnd not found' }
+    $buttons = $taskbar.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        (New-Object System.Windows.Automation.PropertyCondition($Ids::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Button)))
+    return @($buttons | Where-Object { $_.Current.Name -match 'dmultra' } | ForEach-Object { $_.Current.Name })
+}
+function Taskbar-Note {
+    $names = @(Taskbar-ButtonNames)
+    return ("taskbarButtons={0}:{1}" -f $names.Count, ($names -join '|'))
+}
 
 function Show-Check($label, $ok, $detail) {
     $mark = if ($ok) { 'PASS' } else { 'FAIL' }
@@ -229,7 +247,8 @@ try {
     $minimized = if ($popouts.Count -eq 0) { [MinMode]::IsIconic($h) } else { [MinMode]::IsOutOfSight($h) }
     $results += Show-Check 'taskbar: minimize leaves the window off the desktop' $minimized `
         ("popouts={0} {1}" -f $popouts.Count, [MinMode]::Describe($h))
-    $results += Show-Check 'taskbar: window stays on the taskbar' ([MinMode]::HasTaskbarButton($h)) ([MinMode]::Describe($h))
+    $results += Show-Check 'taskbar: window stays on the taskbar' `
+        ((@(Taskbar-ButtonNames)).Count -ge 1) ("{0} {1}" -f (Taskbar-Note), [MinMode]::Describe($h))
     $log = Log-Text
     $results += Show-Check 'taskbar: tray icon was created' ($log -match 'tray icon created') ''
     $results += Show-Check 'taskbar: no tray visibility failure' ($log -notmatch 'could not change tray icon visibility') ''
@@ -244,7 +263,8 @@ try {
     # it is out of sight but still owns its taskbar button (WS_VISIBLE, no
     # WS_EX_TOOLWINDOW). Clicking that button unparks it.
     $results += Show-Check 'taskbar+tray: minimize keeps the taskbar button' `
-        ([MinMode]::HasTaskbarButton($h) -and [MinMode]::IsOutOfSight($h)) ([MinMode]::Describe($h))
+        ((@(Taskbar-ButtonNames)).Count -ge 1 -and [MinMode]::IsOutOfSight($h)) `
+        ("{0} {1}" -f (Taskbar-Note), [MinMode]::Describe($h))
     $results += Show-Check 'taskbar+tray: tray icon present' `
         ((Log-Text) -match 'tray icon created' -and (Log-Text) -notmatch 'tray icon unavailable') ''
 
@@ -268,7 +288,8 @@ try {
     Start-Sleep -Milliseconds 1400
     $results += Show-Check 'tray only: window out of sight' ([MinMode]::IsOutOfSight($h)) ([MinMode]::Describe($h))
     $results += Show-Check 'tray only: parked, not iconic' (-not [MinMode]::IsIconic($h)) ([MinMode]::Describe($h))
-    $results += Show-Check 'tray only: taskbar button gone' (-not [MinMode]::HasTaskbarButton($h)) ([MinMode]::Describe($h))
+    $results += Show-Check 'tray only: taskbar button gone' `
+        ((@(Taskbar-ButtonNames)).Count -eq 0) ("{0} {1}" -f (Taskbar-Note), [MinMode]::Describe($h))
     $results += Show-Check 'tray only: logged the tray minimize' `
         ((Log-Text) -match 'minimize button hid the main window to the tray') ''
 
@@ -278,7 +299,8 @@ try {
     $alive = $null -ne (Get-Process dmultra -ErrorAction SilentlyContinue)
     $results += Show-Check 'tray only: close hides instead of quitting' $alive ("process alive={0}" -f $alive)
     $results += Show-Check 'tray only: close keeps the window out of sight' `
-        ($alive -and [MinMode]::IsOutOfSight($h) -and -not [MinMode]::HasTaskbarButton($h)) ([MinMode]::Describe($h))
+        ($alive -and [MinMode]::IsOutOfSight($h) -and (@(Taskbar-ButtonNames)).Count -eq 0) `
+        ("{0} {1}" -f (Taskbar-Note), [MinMode]::Describe($h))
 }
 finally {
     Stop-App

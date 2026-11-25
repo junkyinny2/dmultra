@@ -12,7 +12,7 @@ Resume order for a new conversation (do not ask the user to re-explain the proje
    history (it is the source of truth for what shipped; `PARITY_PLAN.md` checkboxes
    are stale for phases 2-8).
 
-Last checkpoint: 2026-11-24 21:45 - v0.078 tray-only transition verified end to end: new test-tray-only-transition.ps1 8/8 and minimize-modes 16/16 against the release-zip binaries; deployed hashes re-verified; no new version needed [git 428bb63 master, dirty=0, VERSION 0.078]
+Last checkpoint: 2026-11-24 22:15 - v0.079 built and deployed: the real shell taskbar button is now deleted with `ITaskbarList::DeleteTab` (D-025); both GUI suites rewritten to assert UIA buttons (transition 11/11, modes 16/16); full suite green; docs updated, tag/zip pending [git master pending, VERSION 0.079]
 Refresh: `.\checkpoint.ps1 save -Note "what just changed"`
 Briefing: `.\checkpoint.ps1 status`
 Self-check: `.\checkpoint.ps1 verify` (fails if a memory file is missing, thin or stale)
@@ -47,12 +47,12 @@ no plugins, no BitTorrent, no eD2K, no accounts, no API service. Two binaries:
 | Check | Result |
 |---|---|
 | `.\build.ps1 check` | `Finished`, 0 errors, 80 warnings (the accepted baseline). |
-| `.\build.ps1 test` | **31 passed, 0 failed** - re-run 2026-11-24 after the v0.078 taskbar-refresh test was added. |
+| `.\build.ps1 test` | **31 passed, 0 failed** - re-run 2026-11-24 after the v0.079 taskbar changes. |
 | `node --test browser-extension/background.test.js browser-extension/content.test.js` | **9 pass, 0 fail**. |
 | Frame cost by mode (`test-window-drag-profile.ps1`, v0.078) | 44 drag frames median 0.1 ms, idle median 0.6 ms, exit 0 - measured with VS Code maximized over the desktop, which the harness handles by escalating to the topmost band (7.23). v0.077 was 259 drag frames at 0.1 ms (max 1.4 ms), idle median 0.7 ms; v0.076 was 0.2 ms plain / 0.6 ms with a popout. |
-| GUI end-to-end scripts | minimize-modes **16/16** and the new tray-only transition **8/8** on 2026-11-24 against the released v0.078 binaries (`taskbar=False` in tray-only mode, close keeps the process alive). placement 7/7, startup-registry 6/6, single-instance 4/4, minimized-progress 6/6, minimized-capture exit 0 were last re-measured 2026-11-19 on v0.077. Each runs in a fresh shell (`Add-Type` collides in a reused one) and needs the previous instance stopped **first**. |
-| `.\checkpoint.ps1 test -StopApp` (v0.078) | exit 0: `rust unit tests 31 passed, 0 failed`, `extension tests 9 of 9 pass, 0 fail`, `44 drag frames median 0.1 ms`. `-SkipGui` runs the same two non-desktop suites. Measured 2026-11-24. |
-| Release binaries | `C:\dmultra\dmultra.exe` 15,635,456 B (SHA256 `37DC3141...`) and `C:\dmultra\dmultra-nmh.exe` 506,880 B (SHA256 `1E6B6AAE...`), built 2026-11-24 from `VERSION` 0.078 and re-verified byte-for-byte against `C:\dmultra\unused\releases\dmultra-v0.078-20261124.zip`. The title bar reads "DM Ultra v0.078", confirmed by the GUI harness matching that title. File/ProductVersion 0.28.2.0 (package version, D-014). Both files and the folder still carry the `ALL APPLICATION PACKAGES` read-and-execute grant (D-018). Older binaries kept for A/B: `C:\dmultra\unused\dmultra-v0077.exe`, `C:\dmultra\unused\dmultra-v0078.exe`. |
+| GUI end-to-end scripts | On 2026-11-24 against the deployed v0.079 binaries, and now asserting the **shell's real UIA taskbar buttons** instead of `WS_EX_TOOLWINDOW`: tray-only-transition **11/11** and minimize-modes **16/16** (traces print `taskbarButtons=1:dmultra - 1 running window` in the two taskbar modes, `taskbarButtons=0:` in tray-only). minimized-progress 6/6, minimized-capture exit 0, single-instance 4/4 also re-run on v0.079; placement 7/7 and startup-registry 6/6 were last measured 2026-11-19 on v0.077. Each runs in a fresh shell (`Add-Type` collides in a reused one) and needs the previous instance stopped **first**. |
+| `.\checkpoint.ps1 test -StopApp` (v0.079) | exit 0: `rust unit tests 31 passed, 0 failed`, `extension tests 9 of 9 pass, 0 fail`, `44 drag frames median 0.1 ms`, 102 idle frames median 0.5 ms. `-SkipGui` runs the same two non-desktop suites. Measured 2026-11-24. |
+| Release binaries | `C:\dmultra\dmultra.exe` 15,631,872 B (SHA256 `1C27C8D4...`) and `C:\dmultra\dmultra-nmh.exe` 506,880 B (SHA256 `1E6B6AAE...`), built 2026-11-24 from `VERSION` 0.079. The title bar reads "DM Ultra v0.079", confirmed by the GUI harness. File/ProductVersion 0.28.2.0 (package version, D-014). Both files and the folder still carry the `ALL APPLICATION PACKAGES` read-and-execute grant (D-018). Older binaries kept for A/B: `C:\dmultra\unused\dmultra-v0077.exe`, `C:\dmultra\unused\dmultra-v0078.exe`. |
 | Version strings | `Cargo.toml` 0.28.2 = `EXT_VERSION` (`env!("CARGO_PKG_VERSION")`) = generated and on-disk extension manifest 0.28.2. `VERSION` 0.078 is the release counter (title bar, About, tags) and is deliberately independent of the package version - see D-014. |
 | Git | On `master`, reached with `git checkout --ignore-other-worktrees master`: the branch was locked to the stale `C:/dmultra/unused` worktree, which is why HEAD was detached. Tags `v0.074` (`385cc3a`), `v0.075`, `v0.076`, `v0.077`, `v0.078`. `unused/` and `reference/` are ignored (D-019); the eight `test-*.ps1` scripts are tracked. Remote `https://github.com/junkyinny2/dmultra.git`; other branch `tauri-gui` (abandoned non-egui GUI). |
 | Release zips | `C:\dmultra\unused\releases\dmultra-v0.074-20261119.zip`, `dmultra-v0.075-20261119.zip`, `dmultra-v0.076-20261119.zip`, `dmultra-v0.077-20261119.zip` and `dmultra-v0.078-20261124.zip` - each the source tree plus both exes under a `dmultra-vX.YYY/` folder (the v0.078 zip has 105 entries). |
@@ -64,10 +64,10 @@ no plugins, no BitTorrent, no eD2K, no accounts, no API service. Two binaries:
 | Module | Lines | Responsibility |
 |---|---:|---|
 | `engine.rs` | 1530 | Segmented multi-connection engine: chunk split (default 8, `MIN_PART_SIZE` 1 MiB), dynamic re-split of the largest remaining chunk, 64-byte overlap verification, `Range` resume with `If-Range`, part files + assembly with 49x200 ms sharing retries, `Outcome`/`JobOptions`/`Job`/`Shared`. |
-| `gui.rs` | 4931 | eframe app: download list, toolbar, tray, popouts (`render_details`, `render_add_url`, delete confirm, grabber, scheduler), `centered_popup_pos`, `POPOUT_CHROME_W/H`, `frame_seq`, `open_download_file` (shell open verb). |
+| `gui.rs` | 5739 | eframe app: download list, toolbar, tray, popouts (`render_details`, `render_add_url`, delete confirm, grabber, scheduler), `centered_popup_pos`, `POPOUT_CHROME_W/H`, `frame_seq`, `open_download_file` (shell open verb), minimize-mode change handling (D-026). |
 | `options.rs` | 3368 | Settings dialog as its own OS window (`dm-settings`), theme palette, per-host limits, proxy, post-download + antivirus sections. |
 | `main.rs` | 879 | CLI (`add list resume pause remove queue schedule limits config monitor clean gui browser nm`), `--background`, single-instance handoff, panic hook, shared tokio runtime. |
-| `browser.rs` | 1491 | Extension source + manifests embedded in the binary, NM host registration (`com.dmultra.nm`), pending queue (`take_pending`, 60 s max age), `spawn_busy_waker` (self-clocking), AppContainer ACL grants. |
+| `browser.rs` | 1931 | Extension source + manifests embedded in the binary, NM host registration (`com.dmultra.nm`), pending queue (`take_pending`, 60 s max age), `spawn_busy_waker` (self-clocking), AppContainer ACL grants, main-window park hook and `ITaskbarList` tab control (D-025). |
 | `state.rs` | 704 | `State`/`Settings`/`DownloadRec`/`ChunkRec`/`Webhook`/`Proxies`/`Quota`, `schema` + `migrate()`, atomic save via `state.json.tmp`, corrupt file -> `state.json.corrupt`, `derive_save_path`. |
 | `http.rs` | 511 | Hand-rolled HTTP/1.x client, digest (Basic/Bearer) auth, proxies. |
 | `manager.rs` | 437 | GUI-facing manager: `start/stop/set_connections/start_queue/reap`, `DownloadStats` (`ProgressSink`), `lock_ui()` (the ONLY safe GUI-side state lock). |
@@ -124,13 +124,11 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
 
 ## 6. Open work (details and priority in `TASKS.md`)
 
-1. The six GUI end-to-end scripts are tracked again but have not been run since the
-   folder cleanup.
-2. The browser extension has to be reloaded (chrome://extensions -> Reload) before the
+1. The browser extension has to be reloaded (chrome://extensions -> Reload) before the
    v0.075 `content.js` is the one actually running in the browser.
-3. Docs drift: `README.md` still advertises RSS (there is no RSS code in `src/`) and
+2. Docs drift: `README.md` still advertises RSS (there is no RSS code in `src/`) and
    `PARITY_PLAN.md` checkboxes lag far behind `PROGRESS.md`.
-4. 80 compiler warnings are the standing baseline.
+3. 80 compiler warnings are the standing baseline.
 
 ## 7. Errors hit and how they were fixed (do not re-derive these)
 
@@ -160,37 +158,40 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
 | 7.22 | `test-single-instance.ps1` failed its first check on v0.077 after passing 4/4 on v0.076 | Not an app change. The script asserted `NOT IsWindowVisible` for a `--background` launch - the pre-v0.073 hide semantics - while a background launch parks as `visible=True at=(-32000,-32000)`. `unused\probe-bg.ps1` run against the deployed 0.077 **and** the saved `C:\dmultra\unused\dmultra-v0076.exe` gives both binaries the identical settled state, and the not-visible state exists only 230-350 ms after the window is created (eframe's anti-flash), so the old check passed only when its 150 ms poll happened to land in that transient | Assert the state *settled* (out of sight and holding) instead of one sample; wait for a genuine on-screen reveal, because a parked window is also `WS_VISIBLE`; and wait for the second process to exit instead of sampling it once. 4/4 exit 0, twice in a row |
 | 7.23 | `test-window-drag-profile.ps1` threw "our window will not come to the top of the Z-order at its caption" and took `checkpoint.ps1 test` red with it | Not an app bug: VS Code was maximized and owned the caption - `WindowFromPoint` returned its hwnd while our own `WM_NCHITTEST` on the same point answered HTCAPTION - and a process that did not start in the foreground may legitimately be refused, so both `SetForegroundWindow` and `SwitchToThisWindow` failed | The harness escalates a third time: `HWND_TOPMOST` with `SWP_NOMOVE\|NOSIZE\|NOACTIVATE` for the duration of the drag, then `HWND_NOTOPMOST` before anything is reported, so no lasting change is left. Measured 259 drag frames at 0.1 ms median with VS Code still maximized |
 | 7.24 | `Tray only` selected in Options still left a DM Ultra taskbar button | `park()` added `WS_EX_TOOLWINDOW` but skipped the `SW_HIDE`/`SW_SHOW` cycle that tells the shell about the style change whenever the window was *already* parked (`&& !already`). A fresh close was always correct; only the mode-change transition failed. `wake_for_popouts` also hard-coded `park(false)` | Removed the guard, added the pure `needs_taskbar_refresh` helper + unit test, and made the popout path honour `MAIN_MODE` (v0.078, D-024). Both exes rebuilt and deployed; `build.ps1 check` 0 errors / 80 warnings |
+| 7.25 | v0.078's "8/8 PASS" did not match the user's report: the taskbar button was still drawn with the style bit set | The suites asserted `WS_EX_TOOLWINDOW`, not the shell's button. On this Windows 11 shell, changing the style plus a hide/show cycle does not drop an existing taskbar button; only an explicit `ITaskbarList::DeleteTab` does (proved live by UIA probe and COM experiment) | `wakeup::set_taskbar_tab` calls `DeleteTab`/`AddTab` through a hand-written COM vtable, deduplicated and throttled, with a 2 s re-assert window when Options closes; Apply/OK activation churn suppressed (v0.079, D-025/D-026). Both suites now query `Shell_TrayWnd` via UIA: 11/11 and 16/16 |
 
 ## 8. Exact next steps
 
-1. Reload the browser extension so the deployed `content.js` in
+1. Finish the v0.079 release: commit the source/docs with `VERSION` 0.079, tag `v0.079`,
+   push, zip source + both exes to `C:\dmultra\unused\releases\dmultra-v0.079-20261124.zip`,
+   then re-verify the deployed hashes against the zip and update the git/zip/published rows
+   in section 3.
+2. Reload the browser extension so the deployed `content.js` in
    `C:\dmultra\browser-extension` is the running one, then confirm the "Download this
    video" button disappears within ~6 s of pausing or hiding the video (the 2 s heartbeat
    plus `STALE_AFTER`). The deployed file is already byte-identical to the repo copy
    (both SHA256 `5E3827C2...FFFC36`, verified 2026-11-19); only the browser's own
    chrome://extensions -> Reload is outstanding, and that needs a human at the browser.
-2. Only then pick the next feature from `PARITY_PLAN.md` (the live list is `TASKS.md` P1).
-3. Measure, never eyeball, any change to frame production:
+3. Only then pick the next feature from `PARITY_PLAN.md` (the live list is `TASKS.md` P1).
+4. Measure, never eyeball, any change to frame production:
    `pwsh -NoProfile -File .\test-window-drag-profile.ps1` (add `-ChildUrl <url>` to drag
    with a progress window open), or `.\checkpoint.ps1 test -StopApp` for the whole tree at
-   once. v0.078 must stay at <= 1 ms per dragging frame (D-021) - it measured 0.1 ms on
+   once. v0.079 must stay at <= 1 ms per dragging frame (D-021) - it measured 0.1 ms on
    2026-11-24.
-4. When a GUI script or harness disagrees with the app, prove which of the two is wrong
-   before touching code. Four failures in a row were the harness, not the app: 7.19, 7.20,
-   7.22 (stale pre-D-007 assertions) and 7.23 (the desktop, not the binary). The template
-   is an A/B probe against a saved binary - e.g.
-   `pwsh -NoProfile -File unused\probe-bg.ps1 -Exe C:\dmultra\unused\dmultra-v0076.exe` -
-   and a probe that drives the real thing (the shell's own UIA taskbar button in
-   `unused\probe-uia-taskbar.ps1`) beats a synthesized message.
-5. At every milestone run `.\checkpoint.ps1 save -Note "..."`, keep `TASKS.md` and
+5. When a GUI script or harness disagrees with the app, prove which of the two is wrong
+   before touching code. 7.25 is the latest example: two suites passed 8/8 and 16/16
+   while the user could still see the button, because they checked a window style rather
+   than the shell. A probe that drives the real thing (the shell's own UIA taskbar button
+   in `diag-taskbar.ps1` / `unused\probe-uia-taskbar.ps1`) beats a synthesized message.
+6. At every milestone run `.\checkpoint.ps1 save -Note "..."`, keep `TASKS.md` and
    `CHANGELOG.md` current, and `.\checkpoint.ps1 verify` must stay at exit 0.
 
-Done since the previous checkpoint: v0.078 shipped - switching to `Tray only` while the main
-window was already parked now removes the taskbar button (D-024), popouts honour the
-selected minimize mode, and the new `test-tray-only-transition.ps1` proves the reported
-transition 8/8 against the released binaries while `test-minimize-modes.ps1` stays 16/16.
-Both exes were re-verified against the release zip; no new version was needed for the
-post-tag test. Proof commands are in `TASKS.md`.
+Done since the previous checkpoint: v0.079 in flight - the real shell taskbar button is
+now removed in `Tray only` mode with an explicit `ITaskbarList::DeleteTab` (D-025), and
+Apply/OK activation churn in Options is suppressed without disabling normal taskbar-click
+restores (D-026). `test-tray-only-transition.ps1` is rewritten to assert UIA buttons and
+passes 11/11; `test-minimize-modes.ps1` passes 16/16 with the same real-button assertion.
+Full suite green; both exes built and deployed. Proof commands are in `TASKS.md`.
 
 ## 9. Standing rules that override convenience
 

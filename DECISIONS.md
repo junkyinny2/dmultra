@@ -212,6 +212,36 @@ Consequence: any future hide/park mode that changes extended window styles must 
 shell; "already parked" is never a reason to skip the refresh. D-007's off-screen park and
 D-023's taskbar-button toggle remain unchanged.
 
+### D-025 The shell taskbar button must be deleted explicitly - locked (2026-11-24)
+D-024 made the style change reach the shell, but the user's report was still true:
+a real UI Automation probe of `Shell_TrayWnd` showed `dmultra - 1 running window` after
+Apply, after OK and after `WM_CLOSE`, even though `WS_EX_TOOLWINDOW` was set and the window
+was parked at `(-32000,-32000)`. On this Windows 11 shell, changing the extended style
+plus a hide/show cycle is not enough to drop a button the shell has already created.
+`ITaskbarList::DeleteTab` does, proved live: `HrInit=0 Delete=0`, button count 1 -> 0,
+`AddTab` 0 -> 1, `DeleteTab` again 1 -> 0. `wakeup::set_taskbar_tab` now calls it through a
+minimal hand-written COM vtable (ole32; no new crate) on every transition to tray mode and
+`AddTab` when the button must come back. The call is deduplicated and throttled because
+`hide_main_window()` runs on every hidden frame: `TAB_PRESENT` tracks our last instruction
+and a 200 ms throttle bounds the re-assert window. Closing the last child window (Options)
+makes the shell recreate the grouped button, so `reassert_taskbar_tab_hidden()` opens a
+2 s window of repeated `DeleteTab` calls when Options closes; one-shot re-application on
+the frame the dialog closed was measured to be too early.
+Consequence: `WS_EX_TOOLWINDOW` is no longer evidence of anything about the taskbar. Tests
+must query the shell's own UIA buttons (`Shell_TrayWnd` -> Button -> name matching
+`dmultra`) - both `test-tray-only-transition.ps1` and `test-minimize-modes.ps1` now do.
+Any future hide mode must call `DeleteTab`, not just change a style bit.
+
+### D-026 Apply/OK in Options activates the parked main window - locked (2026-11-24)
+The Options viewport is a separate OS window. Pressing Apply or OK while the main window
+is parked activates it, and D-023 correctly reads that activation as "show me". During a
+change to `Tray only` that side effect immediately undoes the hide and brings the taskbar
+button back. `suppress_restore_after_mode_change()` ignores activation/syscommand restores
+briefly; `DmApp::suppress_options_restore` refreshes that suppression every frame while
+Options remains open after such a change and for one last short window after it closes.
+Consequence: suppression is scoped to a real mode change to `tray` and is never left on;
+the activation rule itself (D-023) stays intact for normal taskbar-button clicks.
+
 ## How to add a decision
 
 Append a heading `### D-0NN <title> - locked | open | superseded by D-0MM`, then the
