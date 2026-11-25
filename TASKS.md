@@ -234,7 +234,8 @@ per-version detail. Add new work under **Todo**, newest P0 first.
 
 ## Doing
 
-- v0.079 release bookkeeping: zip source + both exes, tag `v0.079`, push, verify hashes.
+- Nothing in flight. v0.079 was committed (`6835203`), tagged, pushed and zipped
+  (`dmultra-v0.079-20261124.zip`, 110 entries); deployed exes match the zip hashes.
 
 ## Todo
 

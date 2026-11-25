@@ -12,7 +12,7 @@ Resume order for a new conversation (do not ask the user to re-explain the proje
    history (it is the source of truth for what shipped; `PARITY_PLAN.md` checkboxes
    are stale for phases 2-8).
 
-Last checkpoint: 2026-11-24 22:15 - v0.079 built and deployed: the real shell taskbar button is now deleted with `ITaskbarList::DeleteTab` (D-025); both GUI suites rewritten to assert UIA buttons (transition 11/11, modes 16/16); full suite green; docs updated, tag/zip pending [git master pending, VERSION 0.079]
+Last checkpoint: 2026-11-24 22:17 - v0.079 released: real UIA taskbar button removed with ITaskbarList::DeleteTab; transition 11/11 and modes 16/16; tagged, pushed and zipped [git 6835203 master, dirty=2, VERSION 0.079]
 Refresh: `.\checkpoint.ps1 save -Note "what just changed"`
 Briefing: `.\checkpoint.ps1 status`
 Self-check: `.\checkpoint.ps1 verify` (fails if a memory file is missing, thin or stale)
@@ -54,10 +54,10 @@ no plugins, no BitTorrent, no eD2K, no accounts, no API service. Two binaries:
 | `.\checkpoint.ps1 test -StopApp` (v0.079) | exit 0: `rust unit tests 31 passed, 0 failed`, `extension tests 9 of 9 pass, 0 fail`, `44 drag frames median 0.1 ms`, 102 idle frames median 0.5 ms. `-SkipGui` runs the same two non-desktop suites. Measured 2026-11-24. |
 | Release binaries | `C:\dmultra\dmultra.exe` 15,631,872 B (SHA256 `1C27C8D4...`) and `C:\dmultra\dmultra-nmh.exe` 506,880 B (SHA256 `1E6B6AAE...`), built 2026-11-24 from `VERSION` 0.079. The title bar reads "DM Ultra v0.079", confirmed by the GUI harness. File/ProductVersion 0.28.2.0 (package version, D-014). Both files and the folder still carry the `ALL APPLICATION PACKAGES` read-and-execute grant (D-018). Older binaries kept for A/B: `C:\dmultra\unused\dmultra-v0077.exe`, `C:\dmultra\unused\dmultra-v0078.exe`. |
 | Version strings | `Cargo.toml` 0.28.2 = `EXT_VERSION` (`env!("CARGO_PKG_VERSION")`) = generated and on-disk extension manifest 0.28.2. `VERSION` 0.078 is the release counter (title bar, About, tags) and is deliberately independent of the package version - see D-014. |
-| Git | On `master`, reached with `git checkout --ignore-other-worktrees master`: the branch was locked to the stale `C:/dmultra/unused` worktree, which is why HEAD was detached. Tags `v0.074` (`385cc3a`), `v0.075`, `v0.076`, `v0.077`, `v0.078`. `unused/` and `reference/` are ignored (D-019); the eight `test-*.ps1` scripts are tracked. Remote `https://github.com/junkyinny2/dmultra.git`; other branch `tauri-gui` (abandoned non-egui GUI). |
-| Release zips | `C:\dmultra\unused\releases\dmultra-v0.074-20261119.zip`, `dmultra-v0.075-20261119.zip`, `dmultra-v0.076-20261119.zip`, `dmultra-v0.077-20261119.zip` and `dmultra-v0.078-20261124.zip` - each the source tree plus both exes under a `dmultra-vX.YYY/` folder (the v0.078 zip has 105 entries). |
+| Git | On `master`, reached with `git checkout --ignore-other-worktrees master`: the branch was locked to the stale `C:/dmultra/unused` worktree, which is why HEAD was detached. v0.079 release commit `6835203`, tag `v0.079`; earlier tags `v0.074` (`385cc3a`), `v0.075`, `v0.076`, `v0.077`, `v0.078`. `unused/` and `reference/` are ignored (D-019); the eight `test-*.ps1` scripts are tracked. Remote `https://github.com/junkyinny2/dmultra.git`; other branch `tauri-gui` (abandoned non-egui GUI). |
+| Release zips | `C:\dmultra\unused\releases\dmultra-v0.074-20261119.zip` .. `dmultra-v0.078-20261124.zip` and `dmultra-v0.079-20261124.zip` - each the source tree plus both exes under a `dmultra-vX.YYY/` folder (v0.079 has 110 entries, including both rewritten GUI suites). Both v0.079 exes extracted from the zip match the deployed files byte-for-byte (SHA256 `1C27C8D4...` and `1E6B6AAE...`). |
 | Deployed browser integration | `C:\dmultra\browser-extension\` (`content.js` 15,325 B - the fixed version) plus `dmultra-chrome.zip/.crx` and `dmultra-firefox.xpi`, regenerated on 2026-11-19 by running `C:\dmultra\dmultra.exe browser`. That folder had been archived away by the folder cleanup; the extension has to be reloaded in the browser (chrome://extensions -> Reload) to pick up the new `content.js`. |
-| Published | Pushed 2026-11-24: `origin/master` is at the v0.078 commit (`958766f`) and every tag through `v0.078` is on GitHub (earlier pushes carried `v0.041` .. `v0.077`). Proof: `git --no-pager ls-remote --tags origin` lists `v0.078`. |
+| Published | Pushed 2026-11-24: `origin/master` is at the v0.079 release commit `6835203` and every tag through `v0.079` is on GitHub. Proof: `git --no-pager ls-remote --tags origin` lists `v0.079` (`68352034...`). |
 
 ## 4. Architecture (25 modules, `src/`, line counts as of 2026-11-18)
 
@@ -162,10 +162,8 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
 
 ## 8. Exact next steps
 
-1. Finish the v0.079 release: commit the source/docs with `VERSION` 0.079, tag `v0.079`,
-   push, zip source + both exes to `C:\dmultra\unused\releases\dmultra-v0.079-20261124.zip`,
-   then re-verify the deployed hashes against the zip and update the git/zip/published rows
-   in section 3.
+1. v0.079 is released: `6835203` tagged `v0.079`, pushed, zipped with both exes and the
+   deployed hashes re-verified. No further release action is due.
 2. Reload the browser extension so the deployed `content.js` in
    `C:\dmultra\browser-extension` is the running one, then confirm the "Download this
    video" button disappears within ~6 s of pausing or hiding the video (the 2 s heartbeat
@@ -207,6 +205,7 @@ Full suite green; both exes built and deployed. Proof commands are in `TASKS.md`
   work is mid-flight.
 
 <!-- CHECKPOINT:BEGIN -->
+- 2026-11-24 22:17 | git 6835203 master dirty=2 | v0.079 released: real UIA taskbar button removed with ITaskbarList::DeleteTab; transition 11/11 and modes 16/16; tagged, pushed and zipped
 - 2026-11-24 21:45 | git 428bb63 master dirty=0 | v0.078 tray-only transition verified end to end: new test-tray-only-transition.ps1 8/8 and minimize-modes 16/16 against the release-zip binaries; deployed hashes re-verified; no new version needed
 - 2026-11-19 20:24 | git 88191aa master dirty=0 | v0.077 released: a taskbar-button click on a parked main window shows it again (D-023); test-single-instance.ps1 and test-window-drag-profile.ps1 proven wrong rather than the app and fixed; every suite re-measured green on the deployed 0.077; tagged, pushed and zipped
 - 2026-11-19 17:41 | git 98b35cd master dirty=8 | the three stale GUI scripts now assert the D-007 park contract (13/13, 6/6, exit 0) and checkpoint.ps1 gained a test mode (cargo + node + drag green in 14 s, drag median 0.1 ms)
