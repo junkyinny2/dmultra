@@ -98,6 +98,19 @@ per-version detail. Add new work under **Todo**, newest P0 first.
       deployed with their `ALL APPLICATION PACKAGES` grant verified afterwards (D-018),
       `VERSION` 0.077, tag `v0.077` and the release zip.
 
+### v0.078 - tray-only taskbar button (done 2026-11-24)
+
+- [x] Reproduced the report's starting state (`minimize_mode: tray`) and proved a fresh
+      close already parks correctly (`toolwindow=true`, `taskbar=False`, process alive).
+      The fault is the transition: changing Options while the window is already parked.
+- [x] `src/browser.rs`: removed the `&& !already` guard around the show/hide cycle in
+      `park`, added `needs_taskbar_refresh(no_taskbar, has_tool)` + a unit test, and made
+      `wake_for_popouts` honour `MAIN_MODE` instead of always parking with the taskbar
+      button. Recorded as D-024.
+- [x] Rebuilt, deployed both exes, re-ran the compile check, the unit/extension/frame-cost
+      suites and the GUI minimize-mode script; tagged, pushed and zipped v0.078 with both
+      binaries. See `PROGRESS.md` for the measured results.
+
 ### P0 - tree green, v0.074 and v0.075 landed - done 2026-11-19
 
 - [x] Version drift killed and made permanent: `EXT_VERSION = env!("CARGO_PKG_VERSION")`

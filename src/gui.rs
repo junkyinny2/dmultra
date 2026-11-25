@@ -406,6 +406,22 @@ extern "system" {
     ) -> isize;
 }
 
+// The shell item APIs behind Explorer's own "Open file location". A path is
+// turned into an item ID list (`ILCreateFromPathW`), handed to
+// `SHOpenFolderAndSelectItems`, and freed again.
+#[cfg(target_os = "windows")]
+#[link(name = "shell32")]
+extern "system" {
+    fn ILCreateFromPathW(path: *const u16) -> *mut std::ffi::c_void;
+    fn ILFree(pidl: *mut std::ffi::c_void);
+    fn SHOpenFolderAndSelectItems(
+        folder: *mut std::ffi::c_void,
+        child_count: u32,
+        children: *const *mut std::ffi::c_void,
+        flags: u32,
+    ) -> i32;
+}
+
 /// Why the "Open" action cannot run for `path`, or `None` when the file is on
 /// disk and can be launched. Kept free of any shell call so it is testable and
 /// safe to ask about on every frame.
@@ -420,9 +436,10 @@ fn open_action_blocker(path: &std::path::Path) -> Option<String> {
     }
 }
 
-/// Launch `path` with the program Windows has registered for its extension.
+/// Run `path` through the shell with `verb`: "open" launches it the way a
+/// double-click does, "explore" shows its folder.
 #[cfg(target_os = "windows")]
-fn shell_open(path: &std::path::Path) -> Result<(), String> {
+fn shell_run(verb: &str, path: &std::path::Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
 
     /// SW_SHOWNORMAL: let the associated application open its window normally.
@@ -433,7 +450,7 @@ fn shell_open(path: &std::path::Path) -> Result<(), String> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let verb: Vec<u16> = std::ffi::OsStr::new("open")
+    let verb: Vec<u16> = std::ffi::OsStr::new(verb)
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
@@ -459,12 +476,104 @@ fn shell_open(path: &std::path::Path) -> Result<(), String> {
     })
 }
 
+/// Launch `path` with the program Windows has registered for its extension.
+#[cfg(target_os = "windows")]
+fn shell_open(path: &std::path::Path) -> Result<(), String> {
+    shell_run("open", path)
+}
+
 #[cfg(not(target_os = "windows"))]
 fn shell_open(path: &std::path::Path) -> Result<(), String> {
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     match std::process::Command::new(opener).arg(path).spawn() {
         Ok(_) => Ok(()),
         Err(error) => Err(format!("could not run {opener}: {error}")),
+    }
+}
+
+/// The folder Explorer should show for `path`: the path itself when it is a
+/// directory, otherwise its parent. Pure apart from one `metadata` call, so it
+/// is testable without opening a window.
+fn explorer_folder_for(path: &std::path::Path) -> std::path::PathBuf {
+    let is_dir = std::fs::metadata(path)
+        .map(|meta| meta.is_dir())
+        .unwrap_or(false);
+    if is_dir {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| path.to_path_buf())
+    }
+}
+
+/// Show `path` in Explorer: the folder that holds it, with the file selected
+/// (a directory is opened as itself).
+///
+/// This replaces `explorer.exe <folder>`, which the "Open Folder" buttons used
+/// to run and which is not reliable: when any Explorer window is already open
+/// the shell reuses it instead of showing the folder that was asked for, so the
+/// click looked dead - and the callers threw the result away, so nothing was
+/// recorded either. This is the API Explorer's own "Open file location" uses: it
+/// opens the folder or brings the window that already shows it to the front, and
+/// it reports a status worth logging. The shell "explore" verb is the fallback.
+#[cfg(target_os = "windows")]
+pub fn reveal_in_explorer(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    if wide.len() <= 1 {
+        return Err("the path is empty".to_string());
+    }
+    let mut reason = String::from("the path could not be turned into a shell item");
+    let pidl = unsafe { ILCreateFromPathW(wide.as_ptr()) };
+    if !pidl.is_null() {
+        // No child list: Explorer opens this item's folder and selects the
+        // item, or opens the folder itself when `path` already is one.
+        let hr = unsafe { SHOpenFolderAndSelectItems(pidl, 0, std::ptr::null(), 0) };
+        unsafe { ILFree(pidl) };
+        // S_OK (0) and S_FALSE (1, "it was already showing it") both count as
+        // success; only codes with the severity bit set are failures.
+        if hr >= 0 {
+            return Ok(());
+        }
+        reason = format!("the shell refused the path (0x{:08X})", hr as u32);
+    }
+    // Fallback: the shell "explore" verb on the containing folder.
+    let folder = explorer_folder_for(path);
+    shell_run("explore", &folder)
+        .map_err(|error| format!("{reason}; {error} showing {} in Explorer", folder.display()))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn reveal_in_explorer(path: &std::path::Path) -> Result<(), String> {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    match std::process::Command::new(opener).arg(path).spawn() {
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!("could not run {opener}: {error}")),
+    }
+}
+
+/// `reveal_in_explorer` for a folder, with the outcome logged. `what` names the
+/// folder in the log line ("the save folder") because these actions used to fail
+/// silently and left nothing behind to diagnose.
+pub fn open_folder_in_explorer(dir: &std::path::Path, what: &str) -> Result<(), String> {
+    match reveal_in_explorer(dir) {
+        Ok(()) => {
+            crate::logfile::log("OPEN", &format!("showed {what} in Explorer: {}", dir.display()));
+            Ok(())
+        }
+        Err(error) => {
+            crate::logfile::log(
+                "OPEN",
+                &format!("could not show {what} in Explorer ({}): {error}", dir.display()),
+            );
+            Err(error)
+        }
     }
 }
 
@@ -1425,6 +1534,33 @@ impl DmApp {
         self.status_bar = message;
     }
 
+    /// "Open Folder" action for a download: show the saved file in Explorer
+    /// (the folder that holds it, with the file selected). Reported in the
+    /// status bar and the diagnostic log, because this action used to run
+    /// `explorer.exe` and throw the result away, so a refusal was invisible.
+    fn reveal_download_folder(&mut self, id: u64, path: &std::path::Path) {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        match reveal_in_explorer(path) {
+            Ok(()) => {
+                crate::logfile::log(
+                    "OPEN",
+                    &format!("download #{id} revealed {} in Explorer", path.display()),
+                );
+                self.status_bar = format!("Opened the folder containing {name}.");
+            }
+            Err(error) => {
+                crate::logfile::log(
+                    "OPEN",
+                    &format!("download #{id} failed to reveal {}: {error}", path.display()),
+                );
+                self.status_bar = format!("Could not open the folder: {error}");
+            }
+        }
+    }
+
     fn pause_download(&mut self, id: u64) {
         self.manager.stop(id);
         let mut st = self.manager.lock_ui();
@@ -2338,11 +2474,26 @@ impl eframe::App for DmApp {
         }
 
         // Close button: hide to the tray when one exists, otherwise quit.
-        if ctx.input(|i| i.viewport().close_requested()) && effective_mode != "taskbar" {
-            self.show_main_window = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            crate::browser::hide_main_window();
-            crate::logfile::log("TRAY", "close button hid the main window to the tray");
+        // Close button: hide to the tray when one exists, otherwise quit.
+        // Handle all minimize modes properly - close button behavior
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if close_requested {
+            // For taskbar mode, let the normal close process happen
+            // For tray modes, hide to tray before the close completes
+            match effective_mode {
+                "taskbar" => {
+                    // For taskbar mode, let normal close through
+                    // Don't cancel the close, let the app close completely
+                }
+                _ => {
+                    // For tray modes, hide to tray first, then cancel the close
+                    // This ensures the window disappears properly from taskbar
+                    self.show_main_window = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    crate::browser::hide_main_window();
+                    crate::logfile::log("TRAY", "close button hid the main window to the tray");
+                }
+            }
         }
 
         // Minimize button: tray modes park the window instead of letting it
@@ -2537,7 +2688,9 @@ impl eframe::App for DmApp {
                     ui.menu_button(RichText::new("File").color(text_main()), |ui| {
                         if ui.button("Open Save Folder").clicked() {
                             let save_dir = self.manager.lock_ui().settings.save_path.clone();
-                            let _ = std::process::Command::new("explorer").arg(save_dir).spawn();
+                            if let Err(error) = open_folder_in_explorer(&save_dir, "the save folder") {
+                                self.status_bar = format!("Could not open the save folder: {error}");
+                            }
                         }
                         ui.separator();
                         if ui.button("Export Download List...").clicked() {
@@ -3358,9 +3511,7 @@ impl eframe::App for DmApp {
                                     ui.close_menu();
                                 }
                                 if ui.button("Open Containing Folder").clicked() {
-                                    if let Some(parent) = d.save_path.parent() {
-                                        let _ = std::process::Command::new("explorer").arg(parent).spawn();
-                                    }
+                                    self.reveal_download_folder(d.id, &d.save_path);
                                     ui.close_menu();
                                 }
                                 ui.separator();
@@ -3450,7 +3601,9 @@ impl eframe::App for DmApp {
             if outcome.open_log_dir {
                 let dir = crate::state::state_dir().join("logs");
                 let _ = std::fs::create_dir_all(&dir);
-                let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                if let Err(error) = open_folder_in_explorer(&dir, "the log folder") {
+                    self.status_bar = format!("Could not open the log folder: {error}");
+                }
             }
             if outcome.clean_temp {
                 if self.manager.active_count() > 0 {
@@ -4600,9 +4753,7 @@ impl DmApp {
                                 self.open_download_file(id, &d.save_path);
                             }
                             if ui.button(" Open Folder ").clicked() {
-                                if let Some(parent) = d.save_path.parent() {
-                                    let _ = std::process::Command::new("explorer").arg(parent).spawn();
-                                }
+                                self.reveal_download_folder(id, &d.save_path);
                             }
                             if ui.button(" Close ").clicked() {
                                 close_requested = true;
@@ -5488,6 +5639,33 @@ mod open_action_tests {
         );
         let reason = open_action_blocker(&dir).expect("a folder is not a launchable file");
         assert!(reason.contains("folder"), "unexpected reason: {reason}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explorer_shows_a_file_in_its_parent_and_a_directory_in_itself() {
+        let dir = temp_path("reveal");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the temp folder");
+        let file = dir.join("download.bin");
+        std::fs::write(&file, b"payload").expect("write the temp file");
+
+        assert_eq!(
+            explorer_folder_for(&file),
+            dir,
+            "a file must be revealed in the folder that holds it"
+        );
+        assert_eq!(
+            explorer_folder_for(&dir),
+            dir,
+            "a directory must be revealed as itself"
+        );
+        assert_eq!(
+            explorer_folder_for(&dir.join("not-on-disk-yet.bin")),
+            dir,
+            "a file that has not arrived yet must still resolve to its folder"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

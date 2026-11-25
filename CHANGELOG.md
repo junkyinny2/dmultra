@@ -7,16 +7,15 @@ in version X". Newest first. Status column: `released` = tagged and published,
 
 ## Unreleased
 
-- Nothing in flight. v0.077 - the parked-window taskbar click, plus the two test scripts
-  that were passing or failing on races instead of on behaviour - is committed, tagged and
-  zipped. `.\checkpoint.ps1 test -StopApp` and `.\checkpoint.ps1 verify` both exit 0. The
-  only thing still owed is the manual `chrome://extensions` -> Reload, which needs a human
-  at the browser (the deployed `content.js` is already byte-identical to the repo copy).
+- v0.078 is built and deployed. The manual `chrome://extensions` -> Reload from v0.075 is
+  still the only outstanding user-side step (the deployed `content.js` is byte-identical to
+  the repo copy).
 
 ## Released history
 
 | Version | Status | Headline |
 |---|---|---|
+| v0.078 | tagged + zip | Switching to `Tray only` while the main window was already parked now removes the taskbar button: the `WS_EX_TOOLWINDOW` change is followed by the hide/show cycle the shell needs, even when the window is already parked. A popout opened while the main window is iconic also honours the selected minimize mode instead of hard-coding "keep the taskbar button". |
 | v0.077 | tagged + zip | Clicking the taskbar button of a parked main window shows it again. A parked window is still `WS_VISIBLE`, so the shell sends `SC_MINIMIZE` (not `SC_RESTORE`) on that click and the hook used to park it right back. `test-single-instance.ps1` and `test-window-drag-profile.ps1` also stopped lying: one asserted the pre-D-007 hide semantics, the other could not run against a maximized foreground app. |
 | v0.076 | tagged + zip | Window dragging is no longer capped at ~5 fps: the Win32 window sweep is cached and skipped inside the modal move loop. Measured with a progress window open: 402 ms -> 0.6 ms per frame, 3 -> 40 frames during one title-bar drag, popout close latency 288 ms -> 4 ms. |
 | v0.075 | tagged + zip | Extension: attach the video observer only once `documentElement` exists, label streams with the playing resolution, send the 2 s overlay heartbeat `overlay.rs` expects; `EXT_VERSION` now comes from `CARGO_PKG_VERSION` (D-014 closed). |

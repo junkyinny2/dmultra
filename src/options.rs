@@ -2225,9 +2225,9 @@ impl SettingsDialog {
                             match crate::browser::install() {
                                 Ok(dir) => {
                                     self.toast("Integration installed. Load the extension folder in your browser's extensions page (developer mode).");
-                                    let _ = std::process::Command::new("explorer")
-                                        .arg(&dir)
-                                        .spawn();
+                                    if let Err(e) = crate::gui::open_folder_in_explorer(&dir, "the extension folder") {
+                                        self.toast(&format!("Could not open the extension folder: {e}"));
+                                    }
                                 }
                                 Err(e) => {
                                     self.toast(&format!("Install failed: {e}"));
@@ -3408,8 +3408,10 @@ impl SettingsDialog {
                 srow!(self, ui, pal, first, drawn, hit, "Open folder", "Open the data folder in Explorer.", |ui| {
                     if button(ui, pal, "Open folder", Btn::Ghost).clicked() {
                         let dir = crate::state::state_dir();
-                        let _ = std::process::Command::new("explorer").arg(dir).spawn();
-                        self.toast("Opened the data folder.");
+                        match crate::gui::open_folder_in_explorer(&dir, "the data folder") {
+                            Ok(()) => self.toast("Opened the data folder."),
+                            Err(e) => self.toast(&format!("Could not open the data folder: {e}")),
+                        }
                     }
                 });
             });

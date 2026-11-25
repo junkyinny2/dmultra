@@ -199,6 +199,19 @@ Since v0.073 (D-007) the hidden state is a *park*: the main window moves to `(-3
 While `PARKED` is set, **either** `SC_MINIMIZE` **or** `SC_RESTORE` (and any `WM_ACTIVATE`) is therefore treated as the user asking for the window back: `wakeup::restore_from_park` unparks it, sets `RESTORE_REQUESTED` and posts the synthetic resize, because a parked window otherwise only receives the slow idle pulse from `spawn_busy_waker` and the GUI would not have noticed for up to half a second. `browser::main_window_restore_requested()` hands the request to `DmApp::update`, which folds it into the existing `show_requested` path so `show_main_window` is cleared in the same frame - otherwise the "a hidden window must really be hidden" safety net parks it straight again, which is the other half of why the click looked dead.
 Consequence: never condition the taskbar button on the window being iconic - a parked window never is. Any new hide/park mode must keep the toggle working (one click shows, the next hides) and `test-minimize-modes.ps1` asserts both halves in "taskbar and tray" mode. `unused\probe-uia-taskbar.ps1` proves it through the shell's own UIA button rather than a synthesized message.
 
+### D-024 A taskbar-button style change must refresh the shell even while parked - locked (2026-11-24)
+Windows only drops or creates a taskbar button when it sees a visibility change *after*
+`WS_EX_TOOLWINDOW` changes. `wakeup::park` used to gate that `SW_HIDE`/`SW_SHOW` cycle on
+`!already`, so changing Options from "Taskbar and tray" to "Tray only" while the main window
+was already parked set the style bit but left the old button on screen - exactly the user's
+"it still shows on taskbar" report. The cycle now runs whenever the desired style differs
+from the current one, regardless of the parked flag, and `needs_taskbar_refresh` is unit
+tested. `wakeup::wake_for_popouts` also parks with `MAIN_MODE == 2` instead of a hard-coded
+`false`, because that path must not silently opt a tray-only user back into the taskbar.
+Consequence: any future hide/park mode that changes extended window styles must notify the
+shell; "already parked" is never a reason to skip the refresh. D-007's off-screen park and
+D-023's taskbar-button toggle remain unchanged.
+
 ## How to add a decision
 
 Append a heading `### D-0NN <title> - locked | open | superseded by D-0MM`, then the

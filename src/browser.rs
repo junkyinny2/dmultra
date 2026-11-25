@@ -1244,6 +1244,16 @@ mod wakeup {
         }
     }
 
+    /// Whether the shell must be told about a changed taskbar-button style.
+    ///
+    /// Windows only updates the taskbar when a window with a changed
+    /// `WS_EX_TOOLWINDOW` bit goes through a hide/show cycle. The window may
+    /// already be parked when the option changes, so "already parked" must
+    /// never suppress this refresh.
+    pub(super) fn needs_taskbar_refresh(no_taskbar: bool, has_tool: bool) -> bool {
+        no_taskbar != has_tool
+    }
+
     /// Park the main window off-screen while keeping it `WS_VISIBLE` and
     /// non-iconic, so eframe keeps scheduling frames for the child popouts.
     ///
@@ -1298,11 +1308,17 @@ mod wakeup {
 
         // A style change only reaches the taskbar after a show/hide cycle.
         // Both happen at the parked position, so nothing is ever visible.
-        if no_taskbar != has_tool && !already {
+        // This must run even when the window was already parked: selecting
+        // "Tray only" while the app is parked in "Taskbar and tray" mode is
+        // exactly the case where WS_EX_TOOLWINDOW is added after the fact,
+        // and without the cycle the shell keeps drawing a stale taskbar
+        // button (the old `&& !already` guard caused that).
+        if needs_taskbar_refresh(no_taskbar, has_tool) {
             unsafe {
                 ShowWindow(hwnd, SW_HIDE);
                 ShowWindow(hwnd, SW_SHOW);
             }
+            debug_log("taskbar button state refreshed for the parked main window");
         }
 
         unsafe {
@@ -1391,7 +1407,11 @@ mod wakeup {
             return;
         }
         debug_log("popout opened while the main window was iconic; parking it");
-        park(false);
+        // Honour the selected minimize mode here too. This path is reached
+        // when a download dialog opens while the main window is genuinely
+        // iconic; parking with a hard-coded `false` used to leave a taskbar
+        // button behind even in "Tray only" mode.
+        park(MAIN_MODE.load(Ordering::Relaxed) == 2);
     }
 
     fn ex_style(hwnd: isize) -> isize {
@@ -1649,6 +1669,7 @@ const WS_EX_TOOLWINDOW: i32 = 0x00000080;
 
 #[cfg(test)]
 mod tests {
+    use super::wakeup::needs_taskbar_refresh;
     use super::{is_pending_queue_name, manifest_firefox_json, manifest_json};
 
     #[test]
@@ -1675,5 +1696,16 @@ mod tests {
         assert!(!is_pending_queue_name("nm-trace.log"));
         assert!(!is_pending_queue_name(".json"));
         assert!(!is_pending_queue_name("1760000000000000000-overlay.json"));
+    }
+
+    #[test]
+    fn taskbar_style_changes_always_need_a_refresh() {
+        // "Tray only" selected while already parked in "Taskbar and tray".
+        assert!(needs_taskbar_refresh(true, false));
+        // Switching back while parked must bring the taskbar button back.
+        assert!(needs_taskbar_refresh(false, true));
+        // Idempotent re-parking in the same mode needs no shell notification.
+        assert!(!needs_taskbar_refresh(true, true));
+        assert!(!needs_taskbar_refresh(false, false));
     }
 }

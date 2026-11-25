@@ -419,3 +419,27 @@
   likely reason is fat LTO spanning the whole crate graph on the full rebuild that the
   `include_str!("../VERSION")` bump forced, rather than an incremental relink - an
   inference, not a measurement, and no behaviour difference was seen.
+### v0.078 - 2026-11-24 - "Tray only" removes a stale taskbar button
+
+- User report: with `Options -> General -> Minimize behavior = Tray only (hide from
+  taskbar)` already selected, closing or minimizing still left a DM Ultra button on the
+  taskbar. `%APPDATA%\dmultra\state.json` already held `"minimize_mode": "tray"`, and a
+  fresh launch with `DMULTRA_DEBUG=1` proved the normal path was correct: `WM_CLOSE` logged
+  `main window parked (toolwindow=true)` and the window went to `(-32000,-32000)` with
+  `taskbar=False`. So the fault was in the *transition*, not the setting.
+- `src/browser.rs::wakeup::park` added `WS_EX_TOOLWINDOW` when `no_taskbar` was requested,
+  but the follow-up `ShowWindow(SW_HIDE)/ShowWindow(SW_SHOW)` that makes the shell notice
+  the style change was guarded by `&& !already`. Selecting `Tray only` while the window
+  was already parked in `Taskbar and tray` mode therefore set the bit but never refreshed
+  the shell, leaving the old taskbar button on screen. The guard is gone; the refresh is
+  now driven by the pure `needs_taskbar_refresh(no_taskbar, has_tool)` helper, with a unit
+  test covering both directions and the two idempotent cases.
+- `wakeup::wake_for_popouts` used a hard-coded `park(false)` when a download dialog opened
+  while the main window was genuinely iconic, which kept the taskbar button even in
+  `tray` mode. It now parks with `MAIN_MODE == 2`, so that path honours the same setting.
+- New debug line (only with `DMULTRA_DEBUG`): `taskbar button state refreshed for the
+  parked main window`, so a future stale-button report can be told apart from a settings
+  problem without guesswork.
+- Decision D-024 records why the shell refresh must not be skipped for an already-parked
+  window. `VERSION` 0.078; release check, unit tests and GUI suites re-measured before the
+  tag and zip.
