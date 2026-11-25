@@ -12,7 +12,7 @@ Resume order for a new conversation (do not ask the user to re-explain the proje
    history (it is the source of truth for what shipped; `PARITY_PLAN.md` checkboxes
    are stale for phases 2-8).
 
-Last checkpoint: 2026-11-19 20:24 - v0.077 released: a taskbar-button click on a parked main window shows it again (D-023); test-single-instance.ps1 and test-window-drag-profile.ps1 proven wrong rather than the app and fixed; every suite re-measured green on the deployed 0.077; tagged, pushed and zipped [git 88191aa master, dirty=0, VERSION 0.077]
+Last checkpoint: 2026-11-24 21:45 - v0.078 tray-only transition verified end to end: new test-tray-only-transition.ps1 8/8 and minimize-modes 16/16 against the release-zip binaries; deployed hashes re-verified; no new version needed [git 428bb63 master, dirty=0, VERSION 0.078]
 Refresh: `.\checkpoint.ps1 save -Note "what just changed"`
 Briefing: `.\checkpoint.ps1 status`
 Self-check: `.\checkpoint.ps1 verify` (fails if a memory file is missing, thin or stale)
@@ -206,6 +206,7 @@ post-tag test. Proof commands are in `TASKS.md`.
   work is mid-flight.
 
 <!-- CHECKPOINT:BEGIN -->
+- 2026-11-24 21:45 | git 428bb63 master dirty=0 | v0.078 tray-only transition verified end to end: new test-tray-only-transition.ps1 8/8 and minimize-modes 16/16 against the release-zip binaries; deployed hashes re-verified; no new version needed
 - 2026-11-19 20:24 | git 88191aa master dirty=0 | v0.077 released: a taskbar-button click on a parked main window shows it again (D-023); test-single-instance.ps1 and test-window-drag-profile.ps1 proven wrong rather than the app and fixed; every suite re-measured green on the deployed 0.077; tagged, pushed and zipped
 - 2026-11-19 17:41 | git 98b35cd master dirty=8 | the three stale GUI scripts now assert the D-007 park contract (13/13, 6/6, exit 0) and checkpoint.ps1 gained a test mode (cargo + node + drag green in 14 s, drag median 0.1 ms)
 - 2026-11-19 15:41 | git 6162660 master dirty=4 | drag-profile harness hardened (SwitchToThisWindow escalation + throws when the drag never engaged); re-measured on the shipped v0.076: 40 drag frames at 0.2 ms, idle median 0.3 ms
