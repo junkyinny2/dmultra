@@ -443,3 +443,16 @@
 - Decision D-024 records why the shell refresh must not be skipped for an already-parked
   window. `VERSION` 0.078; release check, unit tests and GUI suites re-measured before the
   tag and zip.
+- Post-tag regression test `test-tray-only-transition.ps1`: starts in `taskbar_tray`, parks
+  with `SC_MINIMIZE` so the taskbar button is present, changes the option to `Tray only`
+  through the real Options OS window (Apply, then OK), then closes the main window. It
+  proves the transition the original user report described: 8/8 checks green on the
+  released binaries, with `taskbar=False`, the window parked off-screen and the process
+  alive. `test-minimize-modes.ps1` was re-run in the same shell sequence and stayed 16/16.
+  An experimental attempt to make the button disappear the instant Apply was pressed was
+  tried and reverted: interacting with Options activates the parked main window, and
+  D-023 treats that activation as a restore request, so suppressing it caused repeated
+  hide/show churn. The contract is that the subsequent close/minimize honours the new
+  mode, which is what v0.078 fixes. No source change, so `VERSION` stays 0.078 and the
+  release zip is unchanged.
+

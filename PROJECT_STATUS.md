@@ -42,22 +42,22 @@ no plugins, no BitTorrent, no eD2K, no accounts, no API service. Two binaries:
 | `C:\dmultra-base\unused` | Items moved out of the clean tree, including the six `test-*.ps1` regression scripts. Explained in `UNUSED_FILES_LOG.md`. |
 | `%APPDATA%\dmultra` | Runtime state: `state.json`, `logs\dmultra.log` (5 MB rotate), `pending\*.json` (browser queue + `overlay.json` heartbeat), `panic.log`. Migrated automatically from the legacy `idm-rs` folder. |
 
-## 3. Current state (measured on 2026-11-19, not remembered)
+## 3. Current state (measured on 2026-11-24, not remembered)
 
 | Check | Result |
 |---|---|
 | `.\build.ps1 check` | `Finished`, 0 errors, 80 warnings (the accepted baseline). |
-| `.\build.ps1 test` | **29 passed, 0 failed** - re-run 2026-11-19 after the v0.076 change. |
+| `.\build.ps1 test` | **31 passed, 0 failed** - re-run 2026-11-24 after the v0.078 taskbar-refresh test was added. |
 | `node --test browser-extension/background.test.js browser-extension/content.test.js` | **9 pass, 0 fail**. |
-| Frame cost by mode (`test-window-drag-profile.ps1`, v0.077) | 259 drag frames median 0.1 ms (max 1.4 ms), idle median 0.7 ms, exit 0 - measured with VS Code maximized over the desktop, which the harness now handles by escalating to the topmost band (7.23). v0.076 was 0.2 ms plain / 0.6 ms with a popout; v0.075 measured 200.6 ms idle, 402.2 ms live and 200-403 ms while dragging. |
-| GUI end-to-end scripts (v0.077) | placement 7/7, startup-registry 6/6, single-instance 4/4 (twice in a row), minimize-modes 16/16 - including the two new taskbar-button checks - minimized-progress 6/6, minimized-capture exit 0; all re-measured 2026-11-19 against the deployed 0.077. Each runs in a fresh shell (`Add-Type` collides in a reused one) and needs the previous instance stopped **first**, because several scripts leave one running. |
-| `.\checkpoint.ps1 test -StopApp` (v0.077) | exit 0 in 17 s: `rust unit tests 29 passed, 0 failed`, `extension tests 9 of 9 pass, 0 fail`, `gui frame cost 1458 idle frames median 0.3 ms, 673 drag frames median 0.1 ms`. `-SkipGui` runs the same two non-desktop suites in 3 s. Measured 2026-11-19. |
-| Release binaries | `C:\dmultra\dmultra.exe` 15,649,280 B and `C:\dmultra\dmultra-nmh.exe` 506,880 B, built 2026-11-19 19:05-19:07 from `VERSION` 0.077. The title bar reads "DM Ultra v0.077" - proved by the drag harness finding the window by that exact title. File/ProductVersion 0.28.2.0 (package version, D-014). Both files and the folder still carry the `ALL APPLICATION PACKAGES` read-and-execute grant (D-018) - re-checked after the copy. Older binaries kept for A/B: `C:\dmultra\unused\dmultra-baseline-v0075.exe`, `C:\dmultra\unused\dmultra-v0076.exe`. |
-| Version strings | `Cargo.toml` 0.28.2 = `EXT_VERSION` (`env!("CARGO_PKG_VERSION")`) = generated and on-disk extension manifest 0.28.2. `VERSION` 0.077 is the release counter (title bar, About, tags) and is deliberately independent of the package version - see D-014. |
-| Git | On `master`, reached with `git checkout --ignore-other-worktrees master`: the branch was locked to the stale `C:/dmultra/unused` worktree, which is why HEAD was detached. Tags `v0.074` (`385cc3a`), `v0.075`, `v0.076`, `v0.077`. `unused/` and `reference/` are ignored (D-019); the seven `test-*.ps1` scripts are tracked. Remote `https://github.com/junkyinny2/dmultra.git`; other branch `tauri-gui` (abandoned non-egui GUI). |
-| Release zips | `C:\dmultra\unused\releases\dmultra-v0.074-20261119.zip`, `dmultra-v0.075-20261119.zip`, `dmultra-v0.076-20261119.zip` and `dmultra-v0.077-20261119.zip` - each the source tree plus both exes under a `dmultra-vX.YYY/` folder (the v0.074 zip has 105 entries). |
+| Frame cost by mode (`test-window-drag-profile.ps1`, v0.078) | 44 drag frames median 0.1 ms, idle median 0.6 ms, exit 0 - measured with VS Code maximized over the desktop, which the harness handles by escalating to the topmost band (7.23). v0.077 was 259 drag frames at 0.1 ms (max 1.4 ms), idle median 0.7 ms; v0.076 was 0.2 ms plain / 0.6 ms with a popout. |
+| GUI end-to-end scripts | minimize-modes **16/16** and the new tray-only transition **8/8** on 2026-11-24 against the released v0.078 binaries (`taskbar=False` in tray-only mode, close keeps the process alive). placement 7/7, startup-registry 6/6, single-instance 4/4, minimized-progress 6/6, minimized-capture exit 0 were last re-measured 2026-11-19 on v0.077. Each runs in a fresh shell (`Add-Type` collides in a reused one) and needs the previous instance stopped **first**. |
+| `.\checkpoint.ps1 test -StopApp` (v0.078) | exit 0: `rust unit tests 31 passed, 0 failed`, `extension tests 9 of 9 pass, 0 fail`, `44 drag frames median 0.1 ms`. `-SkipGui` runs the same two non-desktop suites. Measured 2026-11-24. |
+| Release binaries | `C:\dmultra\dmultra.exe` 15,635,456 B (SHA256 `37DC3141...`) and `C:\dmultra\dmultra-nmh.exe` 506,880 B (SHA256 `1E6B6AAE...`), built 2026-11-24 from `VERSION` 0.078 and re-verified byte-for-byte against `C:\dmultra\unused\releases\dmultra-v0.078-20261124.zip`. The title bar reads "DM Ultra v0.078", confirmed by the GUI harness matching that title. File/ProductVersion 0.28.2.0 (package version, D-014). Both files and the folder still carry the `ALL APPLICATION PACKAGES` read-and-execute grant (D-018). Older binaries kept for A/B: `C:\dmultra\unused\dmultra-v0077.exe`, `C:\dmultra\unused\dmultra-v0078.exe`. |
+| Version strings | `Cargo.toml` 0.28.2 = `EXT_VERSION` (`env!("CARGO_PKG_VERSION")`) = generated and on-disk extension manifest 0.28.2. `VERSION` 0.078 is the release counter (title bar, About, tags) and is deliberately independent of the package version - see D-014. |
+| Git | On `master`, reached with `git checkout --ignore-other-worktrees master`: the branch was locked to the stale `C:/dmultra/unused` worktree, which is why HEAD was detached. Tags `v0.074` (`385cc3a`), `v0.075`, `v0.076`, `v0.077`, `v0.078`. `unused/` and `reference/` are ignored (D-019); the eight `test-*.ps1` scripts are tracked. Remote `https://github.com/junkyinny2/dmultra.git`; other branch `tauri-gui` (abandoned non-egui GUI). |
+| Release zips | `C:\dmultra\unused\releases\dmultra-v0.074-20261119.zip`, `dmultra-v0.075-20261119.zip`, `dmultra-v0.076-20261119.zip`, `dmultra-v0.077-20261119.zip` and `dmultra-v0.078-20261124.zip` - each the source tree plus both exes under a `dmultra-vX.YYY/` folder (the v0.078 zip has 105 entries). |
 | Deployed browser integration | `C:\dmultra\browser-extension\` (`content.js` 15,325 B - the fixed version) plus `dmultra-chrome.zip/.crx` and `dmultra-firefox.xpi`, regenerated on 2026-11-19 by running `C:\dmultra\dmultra.exe browser`. That folder had been archived away by the folder cleanup; the extension has to be reloaded in the browser (chrome://extensions -> Reload) to pick up the new `content.js`. |
-| Published | Pushed 2026-11-19: `origin/master` is at the v0.077 commit and every tag through `v0.077` is on GitHub (earlier pushes carried `v0.041` .. `v0.076`). Proof: `git --no-pager ls-remote --tags origin` lists `v0.077`. |
+| Published | Pushed 2026-11-24: `origin/master` is at the v0.078 commit (`958766f`) and every tag through `v0.078` is on GitHub (earlier pushes carried `v0.041` .. `v0.077`). Proof: `git --no-pager ls-remote --tags origin` lists `v0.078`. |
 
 ## 4. Architecture (25 modules, `src/`, line counts as of 2026-11-18)
 
@@ -173,8 +173,8 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
 3. Measure, never eyeball, any change to frame production:
    `pwsh -NoProfile -File .\test-window-drag-profile.ps1` (add `-ChildUrl <url>` to drag
    with a progress window open), or `.\checkpoint.ps1 test -StopApp` for the whole tree at
-   once. v0.077 must stay at <= 1 ms per dragging frame (D-021) - it measured 0.1 ms on
-   2026-11-19.
+   once. v0.078 must stay at <= 1 ms per dragging frame (D-021) - it measured 0.1 ms on
+   2026-11-24.
 4. When a GUI script or harness disagrees with the app, prove which of the two is wrong
    before touching code. Four failures in a row were the harness, not the app: 7.19, 7.20,
    7.22 (stale pre-D-007 assertions) and 7.23 (the desktop, not the binary). The template
@@ -185,11 +185,12 @@ needed -> the GUI reads the pending queue every frame (`browser::take_pending`) 
 5. At every milestone run `.\checkpoint.ps1 save -Note "..."`, keep `TASKS.md` and
    `CHANGELOG.md` current, and `.\checkpoint.ps1 verify` must stay at exit 0.
 
-Done since the previous checkpoint: v0.077 shipped - the taskbar button of a parked main
-window now shows it instead of re-parking it (D-023), `test-single-instance.ps1` and
-`test-window-drag-profile.ps1` were corrected after being proven wrong rather than the app,
-and the whole tree was re-measured against the deployed 0.077, tagged and zipped. Proof
-commands are in `TASKS.md`.
+Done since the previous checkpoint: v0.078 shipped - switching to `Tray only` while the main
+window was already parked now removes the taskbar button (D-024), popouts honour the
+selected minimize mode, and the new `test-tray-only-transition.ps1` proves the reported
+transition 8/8 against the released binaries while `test-minimize-modes.ps1` stays 16/16.
+Both exes were re-verified against the release zip; no new version was needed for the
+post-tag test. Proof commands are in `TASKS.md`.
 
 ## 9. Standing rules that override convenience
 

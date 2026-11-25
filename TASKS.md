@@ -110,6 +110,11 @@ per-version detail. Add new work under **Todo**, newest P0 first.
 - [x] Rebuilt, deployed both exes, re-ran the compile check, the unit/extension/frame-cost
       suites and the GUI minimize-mode script; tagged, pushed and zipped v0.078 with both
       binaries. See `PROGRESS.md` for the measured results.
+- [x] Added `test-tray-only-transition.ps1` after the tag: starts in `taskbar_tray`, parks
+      the main window with its taskbar button via `SC_MINIMIZE`, changes Minimize behavior
+      to `Tray only` in the real Options dialog, presses Apply then OK, and closes the
+      window. 8/8 checks pass against the released v0.078 binaries (`taskbar=False`,
+      process alive). No source change, so no new version was cut.
 
 ### P0 - tree green, v0.074 and v0.075 landed - done 2026-11-19
 
@@ -263,13 +268,13 @@ checkboxes are stale, so this list is the live version)
 | Suite | Command | Today |
 |---|---|---|
 | Compile | `cd C:\dmultra-base; .\build.ps1 check` | 0 errors, 80 warnings |
-| Rust tests | `cd C:\dmultra-base; .\build.ps1 test` | 29 passed, 0 failed (measured 2026-11-19) |
+| Rust tests | `cd C:\dmultra-base; .\build.ps1 test` | 31 passed, 0 failed (measured 2026-11-24) |
 | Extension tests | `cd C:\dmultra-base; node --test browser-extension/background.test.js browser-extension/content.test.js` | 9 pass, 0 fail (measured 2026-11-19) |
 | Release build | `cd C:\dmultra-base; .\build.ps1 build --release` | ok (kill any running dmultra first) |
 | Memory files | `cd C:\dmultra-base; .\checkpoint.ps1 verify` | must exit 0 |
-| Everything at once | `cd C:\dmultra-base; .\checkpoint.ps1 test -StopApp` | exit 0 in 17 s (measured 2026-11-19 on the deployed v0.077): rust 29/29, extension 9/9, 1458 idle frames median 0.3 ms, 673 drag frames median 0.1 ms. `-SkipGui` drops the cursor-dependent harness and finishes in 3 s |
-| GUI end-to-end | `pwsh -NoProfile -File .\test-<name>.ps1` (fresh process each: `Add-Type` collides in a reused shell), and stop the running instance before **each** script - they start their own and several leave one running | measured 2026-11-19 on the deployed v0.077: placement 7/7, startup-registry 6/6, single-instance 4/4 (twice in a row), minimize-modes 16/16, minimized-progress 6/6, minimized-capture exit 0 |
-| Frame cost by mode | `pwsh -NoProfile -File .\test-window-drag-profile.ps1` (add `-ChildUrl <url>` to drag with a progress window open) | v0.077: 259 drag frames median 0.1 ms (max 1.4), idle median 0.7 ms - and it now works with a maximized app on the foreground because it escalates to the topmost band. v0.076: drag 0.2 ms plain / 0.6 ms with a popout, idle median 0.7 ms, live median 0.8 ms. v0.075 measured 200.5 / 402.7 / 200.6 / 402.2 ms |
+| Everything at once | `cd C:\dmultra-base; .\checkpoint.ps1 test -StopApp` | exit 0 (measured 2026-11-24 on the deployed v0.078): rust 31/31, extension 9/9, 44 drag frames median 0.1 ms. `-SkipGui` drops the cursor-dependent harness |
+| GUI end-to-end | `pwsh -NoProfile -File .\test-<name>.ps1` (fresh process each: `Add-Type` collides in a reused shell), and stop the running instance before **each** script - they start their own and several leave one running | measured 2026-11-24 on the released v0.078 binaries: minimize-modes 16/16, tray-only-transition 8/8; placement 7/7, startup-registry 6/6, single-instance 4/4, minimized-progress 6/6, minimized-capture exit 0 were last measured 2026-11-19 on v0.077 |
+| Frame cost by mode | `pwsh -NoProfile -File .\test-window-drag-profile.ps1` (add `-ChildUrl <url>` to drag with a progress window open) | v0.078: 44 drag frames median 0.1 ms, idle median 0.6 ms. v0.077: 259 drag frames median 0.1 ms (max 1.4), idle median 0.7 ms - works with a maximized app in the foreground via topmost-band escalation. v0.076: drag 0.2 ms plain / 0.6 ms with a popout, idle median 0.7 ms. v0.075 measured 200.5 / 402.7 / 200.6 / 402.2 ms |
 
 Deploy after a release build: copy `target\release\dmultra.exe` AND
 `target\release\dmultra-nmh.exe` to `C:\dmultra` (Defender exclusion lives there).

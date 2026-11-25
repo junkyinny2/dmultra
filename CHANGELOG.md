@@ -7,9 +7,12 @@ in version X". Newest first. Status column: `released` = tagged and published,
 
 ## Unreleased
 
-- v0.078 is built and deployed. The manual `chrome://extensions` -> Reload from v0.075 is
-  still the only outstanding user-side step (the deployed `content.js` is byte-identical to
-  the repo copy).
+- v0.078 is built and deployed (deployed hashes re-verified against the release zip).
+  Added `test-tray-only-transition.ps1` after the tag: it drives the real Options dialog
+  through the reported tray-only transition and passes 8/8; no source change, so no new
+  version was cut. The manual `chrome://extensions` -> Reload from v0.075 is still the
+  only outstanding user-side step (the deployed `content.js` is byte-identical to the repo
+  copy).
 
 ## Released history
 
